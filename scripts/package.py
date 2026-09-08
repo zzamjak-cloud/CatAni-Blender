@@ -12,6 +12,11 @@ import zipfile
 
 from validate_release import ROOT, RUNTIME_FILES, validate
 
+MOTION_SAMPLE_FILES = (
+    Path("motions/motions.json"),
+    Path("motions/demo/friendly_wave.bvh"),
+)
+
 
 def resolve_blender(value=None):
     candidate = value or os.environ.get("BLENDER_BINARY") or shutil.which("blender")
@@ -41,9 +46,15 @@ def build(blender, output_dir, tag=None):
         source.mkdir()
         for name in RUNTIME_FILES:
             shutil.copy2(ROOT / "catani" / name, source / name)
+        for name in MOTION_SAMPLE_FILES:
+            sample_destination = source / name
+            sample_destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, sample_destination)
         shutil.copy2(ROOT / "LICENSE", source / "LICENSE")
         # 체크아웃 시각이나 운영체제 권한 차이가 ZIP 메타데이터에 섞이지 않게 한다.
-        for path in source.iterdir():
+        for path in source.rglob("*"):
+            if path.is_dir():
+                continue
             path.chmod(0o644)
             os.utime(path, (946684800, 946684800))
         env = dict(os.environ, BLENDER_USER_RESOURCES=str(work / "profile"))
@@ -54,7 +65,7 @@ def build(blender, output_dir, tag=None):
         run_checked(prefix + ["build", "--source-dir", str(source), "--output-filepath", str(archive)], env, "extension_build")
         with zipfile.ZipFile(archive) as package:
             names = package.namelist()
-            expected = set(RUNTIME_FILES) | {"LICENSE"}
+            expected = set(RUNTIME_FILES) | {"LICENSE"} | {name.as_posix() for name in MOTION_SAMPLE_FILES}
             if set(names) != expected or len(names) != len(expected):
                 raise ValueError(f"ZIP 파일 목록이 허용 목록과 다릅니다: {names}")
             if package.testzip() is not None:

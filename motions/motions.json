@@ -1,0 +1,10 @@
+{
+  "motions": [
+    {
+      "file": "demo/friendly_wave.bvh",
+      "name": "데모 손 인사",
+      "tags": ["wave", "greeting", "friendly", "demo"],
+      "description": "CatAni 기본 확인용으로 직접 작성한 짧은 BVH 모션"
+    }
+  ]
+}

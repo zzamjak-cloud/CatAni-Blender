@@ -33,7 +33,8 @@ def validate(root=ROOT, tag=None):
         if not (root / "catani" / name).is_file():
             raise ValueError(f"필수 런타임 파일이 없습니다: {name}")
     for name in ("LICENSE", "README.md", "Blender/Player_Animation_01.blend",
-                 "scripts/dev_bootstrap.py", "tests/fixtures/natural_wave_plan.json"):
+                 "scripts/dev_bootstrap.py", "tests/fixtures/natural_wave_plan.json",
+                 "motions/motions.json", "motions/demo/friendly_wave.bvh"):
         if not (root / name).is_file():
             raise ValueError(f"배포 검사 입력이 없습니다: {name}")
     plans = runpy.run_path(str(root / "catani/agent_plan.py"))
