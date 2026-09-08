@@ -56,8 +56,15 @@ def validate(root=ROOT, tag=None):
     for token in ("dev_run.sh", "dev_run.ps1", "dev_run.bat"):
         if token not in readme:
             raise ValueError(f"README 실행법 누락: {token}")
-    if shutil.which("bash"):
-        subprocess.run(["bash", "-n", str(root / "scripts/dev_run.sh")], check=True)
+    bash = shutil.which("bash")
+    # Windows 런너의 System32\bash.exe는 WSL 실행 스텁이라 배포판이 없으면 종료 코드 1을 낸다.
+    if bash and "system32" not in bash.replace("/", "\\").lower():
+        # Git Bash는 백슬래시 경로를 이스케이프로 해석하므로 슬래시로 넘긴다.
+        script = str(root / "scripts/dev_run.sh").replace("\\", "/")
+        subprocess.run([bash, "-n", script], check=True)
+        print(json.dumps({"check": "dev_run_sh_syntax", "status": "pass", "bash": bash}, ensure_ascii=False))
+    else:
+        print(json.dumps({"check": "dev_run_sh_syntax", "status": "skip", "reason": "실제 bash 없음"}, ensure_ascii=False))
     print(json.dumps({"check": "release_static", "status": "pass", "version": version}, ensure_ascii=False))
     return manifest
 
