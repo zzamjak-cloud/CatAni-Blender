@@ -1,18 +1,48 @@
 # CatAni
 
-CatAni 0.3.0은 실제 모션 캡처 샘플을 내려받아 Blender 안에서 검색하고 가져오는 Extension입니다. 이전의 자연어 JSON 명세 생성 방식은 제거했습니다. 자연스러운 인체 동작은 직접 절차 코드로 새로 만드는 대신, 공개 BVH/FBX 모션 데이터를 라이브러리로 쌓고 리타게팅 기준으로 사용하는 방향입니다.
+CatAni 0.5.0은 공개 모션 캡처 데이터를 Blender 안에서 **검색하고, 목록에서 골라, 캐릭터에 바로 적용**하는 Extension입니다. 검색어 한 칸, 목록 하나, 적용 버튼 하나가 전체 흐름입니다. 폴더 경로·출처·이용 조건·체크섬·굽기 옵션 같은 정보는 모두 별도 팝업으로 옮겼습니다.
 
-현재 기본 카탈로그에는 CMU Graphics Lab Motion Capture Database 기반 BVH 3개가 들어 있습니다. 애드온은 선택한 항목을 HTTPS로 내려받고, SHA-256 체크섬을 검증한 뒤 `motions/motions.json`에 출처·이용 조건·태그를 기록합니다. API 키나 유료 외부 모델은 필요하지 않습니다.
+기본 카탈로그에는 CMU Graphics Lab Motion Capture Database 기반 BVH **485종**이 걷기·달리기·점프·춤·발차기·오르기 등 **35개 동작 분류**로 정리되어 있습니다. API 키나 유료 외부 모델은 필요하지 않습니다.
 
-## 모션 라이브러리 사용
+## 사용 흐름
 
-1. 개발 실행기로 Blender를 열고 3D View의 `N` 사이드바에서 `CatAni` → `CatAni · 모션 라이브러리` 패널을 엽니다.
-2. **공개 모션 받기 · CMU BVH** 영역에서 `CMU · 손 인사`, `CMU · 걷기`, `CMU · 기다리기` 중 하나를 받습니다.
-3. 다운로드가 끝나면 자동으로 목록이 갱신됩니다. 검색어를 비우면 현재 폴더의 전체 모션을 보여줍니다.
-4. 검색 결과에서 모션을 선택하고 **선택 모션 가져오기**를 누릅니다.
-5. 가져온 모션은 `CatAni 모션 원본` 컬렉션의 독립 리그와 Action으로 생성됩니다. 현재 캐릭터에 바로 덮어쓰지 않으며, 자동 리타게팅은 다음 구현 단계입니다.
+3D View의 `N` 사이드바 → `CatAni` 탭 → `CatAni · 모션` 패널.
 
-직접 보유한 BVH/FBX도 `motions/` 아래에 넣으면 같은 목록에서 검색할 수 있습니다. `motions.json` 예시는 다음과 같습니다.
+1. **검색** 칸에 `걷기`, `walk`, `점프`, `발차기` 같은 단어를 입력합니다. 입력하는 동안 목록이 바로 좁혀지며, 비우면 485종 전체가 보입니다. 한국어 분류 이름과 영어 원본 설명 단어가 모두 태그로 들어 있습니다.
+2. **목록**에는 받아 둔 모션과 아직 받지 않은 공개 모션이 함께 나옵니다. 오른쪽에 `BVH`/`FBX`로 표시되면 로컬 파일이고, `받기 228KB`처럼 보이면 아직 내려받지 않은 공개 데이터입니다.
+3. **대상**에 애니메이션을 적용할 캐릭터 아마추어를 지정합니다. 아마추어를 선택해 둔 상태면 비워 두어도 됩니다.
+4. **적용**을 누릅니다. 아직 받지 않은 모션이면 먼저 내려받아 체크섬을 검증하고, 이어서 자동으로 적용까지 진행합니다.
+5. 패널 아래 한 줄에 결과가 나옵니다. 예: `적용됨 · 부위 22/22 · 1~285f · 키 25,939개 · 방향 오차 0.00°`. 재생하면 캐릭터가 그 동작을 합니다.
+
+`ⓘ 출처` 버튼은 선택 모션의 실제 다운로드 주소, git blob SHA-1, 출처, 이용 조건과 원문 링크를 팝업으로 보여 줍니다. `⚙ 상세` 버튼은 모션 폴더, 프레임 간격, 이동 적용, 바닥 관통 보정, 원본 리그 숨기기와 **마지막 적용 리포트**(본 매핑 표, 규격, 키 수, 검증 오차, 접지 보정량, 음소거한 NLA 트랙)를 담습니다.
+
+내려받은 모션은 Blender 사용자 데이터 폴더(`.../datafiles/catani/motions`)에 쌓입니다. 설치된 애드온 폴더에는 쓰지 않으므로 읽기 전용 설치에서도 동작하며, 애드온에 동봉한 예제 모션은 항상 함께 검색됩니다.
+
+## 적용이 실제로 무엇을 하는지
+
+`적용`은 다음을 순서대로 수행합니다.
+
+1. 모션 파일을 `CatAni 모션 원본` 컬렉션의 독립 리그로 가져옵니다. 같은 파일을 이미 가져왔다면 다시 읽지 않고 재사용합니다.
+2. 두 리그의 본 이름을 표준 22개 부위(엉덩이·척추 3단·목·머리·양쪽 어깨/팔/팔뚝/손·양쪽 허벅지/정강이/발/발끝)에 맞춥니다. 자세한 규칙은 아래 **본 구조 차이 흡수**를 참고하세요.
+3. 짝지은 본에 대해, 캐릭터 본이 **모션 본과 같은 방향을 보도록** 프레임마다 회전을 계산합니다. 레스트 자세가 서로 달라도(모션은 T 자세, 캐릭터는 팔을 내린 자세) 방향을 직접 맞추므로 자세 차이가 결과에 남지 않습니다.
+4. 엉덩이 이동은 첫 프레임을 기준으로 재고 다리 길이 비율로 배율을 맞춥니다. 발이 바닥 아래로 내려가는 프레임에서는 필요한 만큼만 몸 전체를 올립니다(`바닥 관통 보정`, 끌 수 있음).
+5. 결과를 새 Action에 키로 굽습니다. 기존 Action은 fake user로 보존하고, 구운 FK를 덮어쓰는 **활성 NLA 트랙은 음소거**하고 **IK 컨스트레인트 영향은 0으로 고정**합니다. 둘 다 리포트에 적히며 NLA 편집기에서 되돌릴 수 있습니다.
+6. 마지막으로 구간 전체에 고르게 흩은 7개 프레임에서 모션 본과 캐릭터 본의 방향 차이를 다시 재어 **검증 오차**로 보고합니다. 키가 놓이지 않은 프레임을 포함하므로 프레임 간격을 넓혔을 때의 보간 오차까지 드러납니다. 이 값이 0에 가까우면 실제로 적용된 것입니다.
+7. 손이나 머리가 바닥에 닿는 곡예 동작처럼 팔다리 비율 차이로 관통이 남으면 리포트에 깊이와 본 이름을 적습니다. 발 접지만 자동 보정하고, 팔 관통은 몸을 띄우지 않고 그대로 알립니다.
+
+## 본 구조 차이 흡수
+
+여러 경로로 받은 모션과 사용자 리깅은 본 이름 규칙이 서로 다릅니다. CatAni는 세 단계로 좁힙니다.
+
+1. **이름 정규화** — 접두사(`mixamorig:`, `DEF-`, `ORG-`, `Bip01`), 구분자(`_ - . : |`), 대소문자, 장식 토큰(`fk`, `jnt`, `twist`)을 없애고 비교합니다. `upper_arm.L`, `upperarm_l`, `DEF-upper_arm.L`, `Bip01 L UpperArm`이 모두 같은 부위로 인식됩니다. `ik`는 남겨 두어 IK 컨트롤을 FK 본으로 잘못 잡지 않습니다.
+2. **규격 표 대조** — CMU / cgspeed BVH, CMU ASF/AMC 원본 이름, Mixamo, Rigify / Player v1, Unreal / UE 스켈레톤, 3ds Max Biped, Daz Genesis 중 가장 많이 맞는 규격을 고릅니다.
+3. **별칭 + 계층 검증 보완** — 규격으로 못 채운 부위는 별칭(`clavicle`/`collar`/`shoulder`, `calf`/`shin`/`tibia`, `ball`/`toebase`/`toes` 등)으로 찾고, 후보가 이미 확정된 부모 부위의 자손인지 확인한 뒤에만 받아들입니다. 그래서 `hip`처럼 엉덩이와 허벅지 양쪽에 쓰이는 이름도 엉뚱한 자리에 들어가지 않습니다.
+
+세 단계로도 3개 부위를 못 채우면 이름이 완전히 같은 본만 잇고, 그것도 안 되면 지원 규격과 캐릭터 본 예시를 담은 오류를 냅니다. 부분만 맞을 때는 적용을 막지 않고 커버리지를 상태 줄과 리포트에 표시하며, 60% 미만이면 경고로 보고합니다.
+
+검사에서 Unreal, Mixamo, 3ds Max Biped, Daz Genesis, CMU ASF/AMC, Rigify DEF- 접두사, 그리고 규격 표에 없는 임의 이름(`Waist`/`TorsoLower`/`Left_UpArm` 등) 7종 리그 모두 22개 부위를 인식하고 방향 오차 0.0000°로 적용했습니다.
+
+직접 보유한 BVH/FBX도 `⚙ 상세`의 모션 폴더 아래에 넣으면 같은 목록에서 검색됩니다. `motions.json`으로 이름·태그·설명을 붙일 수 있습니다.
 
 ```json
 {
@@ -27,19 +57,19 @@ CatAni 0.3.0은 실제 모션 캡처 샘플을 내려받아 Blender 안에서 �
 }
 ```
 
-## 공개 데이터
+## 공개 데이터와 카탈로그
 
-기본 다운로드 카탈로그는 CMU Graphics Lab Motion Capture Database의 BVH 변환본을 사용합니다. 원본 데이터는 CMU에서 제공하고, BVH 변환본은 cgspeed 변환본을 미러한 `una-dinosauria/cmu-mocap` 저장소의 고정 리비전에서 내려받습니다. CatAni는 다운로드 파일 크기와 SHA-256을 확인한 뒤 등록합니다.
+카탈로그는 CMU Graphics Lab Motion Capture Database의 BVH 변환본을 사용합니다. 원본 데이터는 CMU에서 제공하고, BVH 변환본은 cgspeed 변환본을 미러한 `una-dinosauria/cmu-mocap` 저장소의 **고정 리비전**에서 내려받습니다.
 
-카탈로그에는 현재 다음 항목이 있습니다.
+`catani/motion_catalog.json`은 `scripts/build_catalog.py`가 생성합니다. 이 스크립트는 CMU 공식 설명 인덱스(`cmu-mocap-index-text.txt`)와 고정 리비전의 git 트리를 받아 동작 분류별로 선별하고, HTTP Range 요청으로 각 BVH 머리말의 **실제 프레임 수와 FPS**를 읽어 기록합니다. 항목마다 정확한 바이트 크기와 **git blob SHA-1**이 들어 있어, 내려받은 파일이 그 리비전의 내용과 같은지 로컬에서 확인할 수 있습니다. 애드온은 크기·해시·BVH 머리말을 모두 검증한 뒤에만 파일을 등록하고, 검증에 실패하면 임시 파일까지 지웁니다. 카탈로그를 갱신할 때만 다음을 실행합니다.
 
-| 항목 | 태그 | 크기 |
-| --- | --- | --- |
-| `CMU · 손 인사` | `wave`, `hello`, `greeting` | 약 228 KB |
-| `CMU · 걷기` | `walk`, `walking` | 약 891 KB |
-| `CMU · 기다리기` | `idle`, `waiting` | 약 571 KB |
+```bash
+python3 scripts/build_catalog.py
+```
 
-CMU 데이터는 연구와 상업 제품에 사용할 수 있으나, 변환본을 포함한 모션 데이터 자체를 재판매하지 않아야 합니다. 애드온 UI는 출처와 이용 조건 링크를 함께 표시합니다.
+동작 분류는 35개입니다: 걷기, 느린 걷기, 달리기, 조깅, 대기, 방향 전환, 옆걸음, 뒷걸음, 점프, 한발 뛰기, 계단, 오르기, 기기, 살금살금, 앉기, 일어서기, 춤, 발레, 스트레칭, 발차기, 펀치, 손 인사, 몸짓, 집어 들기, 운반, 던지기, 농구, 구기 운동, 수영 동작, 균형 잡기, 넘어짐, 밀고 당기기, 험한 지형, 생활 동작, 탈것.
+
+CMU 데이터는 연구와 상업 제품에 사용할 수 있으나, 변환본을 포함한 모션 데이터 자체를 재판매하지 않아야 합니다. `ⓘ 출처` 팝업이 출처와 이용 조건 링크를 함께 표시합니다.
 
 ## 개발 실행
 
@@ -76,17 +106,6 @@ scripts\dev_run.bat --background --python-expr "import bpy; print(bpy.app.versio
 
 프로필: `<프로젝트>/.blender-dev/CatAniDev/<Blender 주.부 버전>/`. 연결할 자리에 일반 파일이나 디렉터리가 있으면 보호를 위해 실행을 중단합니다. Windows PowerShell 스크립트는 한국어 메시지 호환을 위해 UTF-8 BOM을 사용합니다. Windows 실제 실행은 별도 검증이 필요합니다.
 
-## 사용 흐름
-
-1. 개발 실행기로 `Blender/Player_Animation_01.blend`를 엽니다.
-2. 3D View의 N 사이드바에서 `CatAni` → `CatAni · 모션 라이브러리` 패널을 엽니다.
-3. 모션 폴더를 확인하고 **공개 모션 받기**에서 필요한 CMU BVH를 내려받습니다.
-4. 검색어를 입력하거나 비운 상태로 **모션 목록 갱신**을 누릅니다.
-5. 원하는 모션을 선택하고 **선택 모션 가져오기**를 누릅니다.
-6. 가져온 원본 리그의 Action을 재생해 확인합니다.
-
-하단의 **보조 · 절차 동작 비교** 패널은 기존 샘플 리그에서 `idle`과 `wave`만 빠르게 비교하기 위한 부가 기능입니다. 새 동작 제작의 기본 흐름은 모션 라이브러리입니다.
-
 ## 로컬 검증
 
 ### Graph Editor에서 동작 수정
@@ -108,6 +127,8 @@ bash scripts/dev_run.sh --background --python tests/blender_operators.py
 bash scripts/dev_run.sh --background --python tests/blender_curves.py
 bash scripts/dev_run.sh --background --python tests/blender_ui_contract.py
 bash scripts/dev_run.sh --background --python tests/blender_motion_library.py
+bash scripts/dev_run.sh --background --python tests/blender_retarget.py
+bash scripts/dev_run.sh --background --python tests/blender_rig_variants.py
 bash scripts/dev_run.sh --background --python tests/render_preview.py
 bash scripts/dev_run.sh --python tests/gui_preview.py
 python3 tests/test_motion_library.py
@@ -122,7 +143,13 @@ python3 tests/motion_download_live.py --allow-network
 
 Windows에서는 같은 인자를 `scripts\dev_run.bat` 또는 `scripts\dev_run.ps1`에 전달합니다.
 
-macOS Blender 5.2.0에서 모션 라이브러리 UI, 제거된 JSON/에이전트 UI 회귀, 합성 BVH 실제 가져오기, ZIP만의 독립 런타임, 보조 절차 동작, 저장 시 미리보기 취소, 등록 해제·재등록을 확인했습니다. Windows는 실행기 정적 검사만 수행했습니다.
+macOS Blender 5.2.0에서 통합 목록·즉시 검색, 다운로드 후 자동 적용, 22부위 리타게팅, 리그 규격 7종 인식, 주 패널 단순화 계약, ZIP만의 독립 런타임, 보조 절차 동작, 저장 시 미리보기 취소, 등록 해제·재등록을 확인했습니다. Windows는 실행기 정적 검사만 수행했습니다.
+
+`blender_retarget.py`는 22개 관절을 가진 합성 CMU 규격 BVH를 실제로 가져와 캐릭터에 굽고, 모든 프레임에서 본 방향 오차가 0.5° 미만인지, 발이 바닥을 파고들지 않는지, 접지 보정을 끄면 첫 프레임 엉덩이가 레스트와 정확히 같은지, NLA와 IK가 결과를 덮지 않는지, 프레임 간격이 키 수에 반영되는지, 본 이름이 맞지 않는 리그가 거부되는지를 검사합니다.
+
+`blender_rig_variants.py`는 Unreal, Mixamo, 3ds Max Biped, Daz Genesis, CMU ASF/AMC, Rigify DEF- 접두사, 규격 밖 임의 이름까지 7종 리그를 만들어 22개 부위 인식과 적용, 방향 오차를 검사합니다.
+
+실제 CMU 데이터로는 걷기·달리기·점프·대기·앉기·춤·발차기·펀치·오르기·기기·손 인사·운반·던지기·계단·뒷걸음·방향 전환 **16개 동작 분류**를 내려받아 적용했습니다. 전부 22/22 부위 매핑, 방향 오차 0.000°, 실패 0건입니다. 그 과정에서 프레임 간격을 넓혔을 때 검증이 보간 오차를 놓치던 문제와 발 바닥 관통을 찾아 고쳤습니다. 손이 바닥을 짚는 곡예 동작(재주넘기 발차기)은 팔다리 비율 차이로 관통이 남으며, 리포트에 깊이와 본 이름으로 보고합니다.
 
 `artifacts/CatAni_Wave_Demo.blend`는 보조 절차 동작 검사에서 생성하는 예제입니다. `render_preview.py`는 정면·측면 이미지를 만들며, `gui_preview.py`는 기본 화면 구성에서 결과를 재생한 후 검증용 Blender를 자동 종료합니다. 원본 샘플 파일에는 저장하지 않습니다.
 
@@ -135,19 +162,19 @@ macOS Blender 5.2.0에서 모션 라이브러리 UI, 제거된 JSON/에이전트
 
 ## 패키징과 릴리즈 준비
 
-배포 후보 버전은 **0.3.0**입니다. 이전 버전은 로컬 개발 이력이며 공개 릴리스가 아닙니다. Python 3.11 이상과 Blender 5.2.0 이상을 준비하고 저장소 루트에서 실행합니다.
+배포 후보 버전은 **0.5.0**입니다. 이전 버전은 로컬 개발 이력이며 공개 릴리스가 아닙니다. Python 3.11 이상과 Blender 5.2.0 이상을 준비하고 저장소 루트에서 실행합니다.
 
 ```bash
-python3 scripts/validate_release.py --tag v0.3.0
+python3 scripts/validate_release.py --tag v0.5.0
 python3 scripts/run_tests.py
-python3 scripts/package.py --tag v0.3.0
+python3 scripts/package.py --tag v0.5.0
 ```
 
 Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는 `BLENDER_BINARY` 또는 각 실행 명령의 `--blender`로 지정합니다. 전체 검사기는 임시 복사본과 독립 프로필에서 실행하므로 기존 개발 결과를 덮어쓰지 않습니다. 실제 CMU 다운로드는 기본 검사에 포함하지 않습니다.
 
-`dist/catani-v0.3.0.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스와 기본 데모 BVH만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 다운로드된 CMU 모션 파일은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
+`dist/catani-v0.5.0.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스와 기본 데모 BVH만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 다운로드된 CMU 모션 파일은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
 
-현재 macOS Blender 5.2.0에서 격리 회귀 검사 8개, 배포 무결성 검사 4개, ZIP 독립 런타임 검증을 통과했습니다. BVH는 합성 테스트 파일로 실제 Blender 가져오기를 확인했고, FBX는 인덱스·검색 경로만 검사했습니다. Windows/Linux 원격 CI와 실제 Pages 원격 설치는 아직 실행하지 않았습니다.
+현재 macOS Blender 5.2.0에서 격리 회귀 검사 10개, 배포 무결성 검사 4개, ZIP 독립 런타임 검증을 통과했습니다. BVH는 합성 테스트 파일로 실제 Blender 가져오기를 확인했고, FBX는 인덱스·검색 경로만 검사했습니다. Windows/Linux 원격 CI와 실제 Pages 원격 설치는 아직 실행하지 않았습니다.
 
 ### GitHub 배포 구성
 
@@ -159,7 +186,7 @@ Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는
 | `.github/workflows/release.yml` | 새 `v*` 태그 push | 동일 CI 성공 및 버전 일치 후 ZIP·SHA-256 Release 게시 |
 | `.github/workflows/pages.yml` | Release 워크플로 성공, 수동 | 공개 정식 릴리스의 검증된 ZIP으로 공식 `server-generate` 실행 및 Pages 게시 |
 
-실제 배포 단계에서는 공개 저장소 생성과 최초 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 설정합니다. 양쪽 OS의 원격 CI, Windows 개발 실행기, ZIP 설치 및 실제 재생을 확인한 뒤 사용하지 않은 `v0.3.0` 태그로 초기 릴리스를 시작합니다. 기존 태그나 릴리스를 덮어쓰지 않습니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올립니다.
+실제 배포 단계에서는 공개 저장소 생성과 최초 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 설정합니다. 양쪽 OS의 원격 CI, Windows 개발 실행기, ZIP 설치 및 실제 재생을 확인한 뒤 사용하지 않은 `v0.5.0` 태그로 초기 릴리스를 시작합니다. 기존 태그나 릴리스를 덮어쓰지 않습니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올립니다.
 
 배포 후 사용할 원격 저장소 주소는 `https://zzamjak-cloud.github.io/CatAni-Blender/index.json`입니다. **아직 활성화된 설치 주소가 아닙니다.** Pages 게시 후 HTTP 응답·버전·ZIP 다운로드와 별도의 깨끗한 프로필에서 원격 설치를 확인해야 합니다.
 

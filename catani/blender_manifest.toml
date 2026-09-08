@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
 id = "catani"
-version = "0.3.0"
+version = "0.5.0"
 name = "CatAni"
-tagline = "로컬 모션 샘플과 최소 곡선 보정으로 캐릭터 동작 구성"
+tagline = "공개 모션 485종을 검색해 캐릭터에 바로 적용"
 maintainer = "CatAni"
 type = "add-on"
 blender_version_min = "5.2.0"
@@ -11,4 +11,4 @@ tags = ["Animation", "Rigging"]
 
 [permissions]
 files = "로컬 BVH/FBX 모션 샘플 검색·가져오기와 인덱스 저장"
-network = "선택한 공개 CMU BVH 모션 파일 다운로드"
+network = "선택한 공개 CMU BVH 모션 파일 다운로드 (raw.githubusercontent.com 고정 리비전)"
