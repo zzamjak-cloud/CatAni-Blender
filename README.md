@@ -4,7 +4,51 @@ CatAni 0.5.1은 공개 모션 캡처 데이터를 Blender 안에서 **검색하�
 
 기본 카탈로그에는 CMU Graphics Lab Motion Capture Database 기반 BVH **485종**이 걷기·달리기·점프·춤·발차기·오르기 등 **35개 동작 분류**로 정리되어 있습니다. API 키나 유료 외부 모델은 필요하지 않습니다.
 
-## 사용 흐름
+## 요구 사항
+
+- **Blender 5.2.0 이상** (Extension 형식)
+- 공개 모션을 내려받을 때만 인터넷 연결. API 키나 계정은 필요하지 않습니다.
+
+## 설치
+
+### 방법 1 · 원격 저장소 등록 (권장)
+
+업데이트 알림을 받을 수 있는 방법입니다.
+
+1. Blender에서 **Edit → Preferences → Get Extensions**를 엽니다.
+2. 우측 상단의 **▼** → **Add Repository...**를 누릅니다. (또는 **Repositories** 목록 아래의 **＋** → **Add Remote Repository**)
+3. **URL**에 다음 주소를 붙여넣습니다.
+
+   ```text
+   https://zzamjak-cloud.github.io/CatAni-Blender/index.json
+   ```
+
+4. **Check for Updates on Startup**을 켜고 대화상자를 확인합니다.
+5. **Get Extensions**의 검색창에 `CatAni`를 입력하고 **Install**을 누릅니다.
+
+새 버전이 나오면 Blender 시작 시 알려 주며, 갱신은 **Install Available Updates**로 사용자가 직접 승인합니다. 무인 자동 설치는 하지 않습니다.
+
+> Blender가 온라인 접근 허용을 물어보면 허용해야 합니다. **Preferences → System → Network → Allow Online Access**에서도 켤 수 있습니다. 이 설정이 꺼져 있으면 저장소 목록은 갱신되지만 설치 단계에서 멈춥니다.
+
+### 방법 2 · ZIP 직접 설치
+
+1. [Releases](https://github.com/zzamjak-cloud/CatAni-Blender/releases/latest)에서 `catani-v0.5.1.zip`을 내려받습니다.
+2. **Edit → Preferences → Get Extensions → ▼ → Install from Disk**를 누릅니다.
+3. 내려받은 ZIP을 선택합니다.
+
+같은 페이지의 `catani-v0.5.1.zip.sha256`으로 무결성을 확인할 수 있습니다.
+
+```bash
+shasum -a 256 -c catani-v0.5.1.zip.sha256   # macOS / Linux
+```
+
+이 방법으로 넣은 설치본은 Blender가 원격 갱신 대상으로 잡지 않습니다. 업데이트 알림을 쓰려면 방법 1을 사용하세요.
+
+### 설치 확인
+
+3D View에서 `N` 키로 사이드바를 열고 **CatAni** 탭이 보이면 완료입니다.
+
+## 빠른 시작
 
 3D View의 `N` 사이드바 → `CatAni` 탭 → `CatAni · 모션` 패널.
 
@@ -59,7 +103,7 @@ CatAni 0.5.1은 공개 모션 캡처 데이터를 Blender 안에서 **검색하�
 
 ## 공개 데이터와 카탈로그
 
-카탈로그는 CMU Graphics Lab Motion Capture Database의 BVH 변환본을 사용합니다. 원본 데이터는 CMU에서 제공하고, BVH 변환본은 cgspeed 변환본을 미러한 `una-dinosauria/cmu-mocap` 저장소의 **고정 리비전**에서 내려받습니다.
+카탈로그는 [CMU Graphics Lab Motion Capture Database](https://mocap.cs.cmu.edu/)의 BVH 변환본을 사용합니다. 원본 데이터는 CMU에서 제공하고, BVH 변환본은 cgspeed 변환본을 미러한 [`una-dinosauria/cmu-mocap`](https://github.com/una-dinosauria/cmu-mocap) 저장소의 **고정 리비전**에서 내려받습니다.
 
 `catani/motion_catalog.json`은 `scripts/build_catalog.py`가 생성합니다. 이 스크립트는 CMU 공식 설명 인덱스(`cmu-mocap-index-text.txt`)와 고정 리비전의 git 트리를 받아 동작 분류별로 선별하고, HTTP Range 요청으로 각 BVH 머리말의 **실제 프레임 수와 FPS**를 읽어 기록합니다. 항목마다 정확한 바이트 크기와 **git blob SHA-1**이 들어 있어, 내려받은 파일이 그 리비전의 내용과 같은지 로컬에서 확인할 수 있습니다. 애드온은 크기·해시·BVH 머리말을 모두 검증한 뒤에만 파일을 등록하고, 검증에 실패하면 임시 파일까지 지웁니다. 카탈로그를 갱신할 때만 다음을 실행합니다.
 
@@ -162,7 +206,7 @@ macOS Blender 5.2.0에서 통합 목록·즉시 검색, 다운로드 후 자동 
 
 ## 패키징과 릴리즈 준비
 
-배포 후보 버전은 **0.5.1**입니다. 이전 버전은 로컬 개발 이력이며 공개 릴리스가 아닙니다. Python 3.11 이상과 Blender 5.2.0 이상을 준비하고 저장소 루트에서 실행합니다.
+현재 공개 버전은 **0.5.1**입니다. 새 버전을 준비할 때는 Python 3.11 이상과 Blender 5.2.0 이상을 갖추고 저장소 루트에서 실행합니다.
 
 ```bash
 python3 scripts/validate_release.py --tag v0.5.1
@@ -188,14 +232,8 @@ macOS Blender 5.2.0 로컬, 그리고 GitHub Actions의 Ubuntu·Windows 원격 C
 
 저장소를 처음 만들 때는 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 한 번 설정해야 합니다. 이 설정 전에는 Pages 워크플로의 빌드 단계는 성공하고 배포 단계만 404로 실패합니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올리고, 새 `v*` 태그만 push합니다. 기존 태그나 릴리스는 덮어쓰지 않습니다.
 
-사용자용 원격 저장소 주소는 다음과 같습니다.
-
-```text
-https://zzamjak-cloud.github.io/CatAni-Blender/index.json
-```
+사용자 설치 방법은 문서 상단의 [설치](#설치)에 있습니다. 원격 저장소 주소는 `https://zzamjak-cloud.github.io/CatAni-Blender/index.json`입니다.
 
 깨끗한 인수 프로필에서 다음을 확인했습니다: 저장소 등록 → 동기화(원격이 `0.5.0`·`0.5.1` 두 버전을 알림) → 0.5.0 설치 → 0.5.1로 교체 → 카탈로그 485종 로드 → 한국어·영어 검색(`발차기` 14건, `walk` 130건, `점프` 14건) → 동봉 예제로 실제 리타게팅. Release 자산의 SHA-256은 `index.json`에 적힌 값과 실제 다운로드 바이트에서 모두 일치했습니다.
 
-Blender의 **Check for Updates on Startup**은 원격 저장소에서 설치한 확장을 대상으로 동작합니다. ZIP을 **Install from Disk**로 넣은 경우 Blender가 파일 설치본을 원격 갱신 대상으로 잡지 않으므로, 자동 업데이트를 쓰려면 원격 저장소를 등록해 설치하세요.
-
-사용자는 Blender **Preferences → Get Extensions → Repositories → Add Remote Repository**에 위 주소를 등록합니다. **Check for Updates on Startup**을 켜면 시작 시 업데이트를 확인하며 설치는 사용자가 승인합니다. 개발용 소스 연결 프로필과 사용자용 원격 설치 프로필을 분리합니다.
+개발용 소스 연결 프로필, 사용자용 원격 설치 프로필, 배포 인수 프로필은 서로 분리해 씁니다.
