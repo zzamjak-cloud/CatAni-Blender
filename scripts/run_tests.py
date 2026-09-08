@@ -42,6 +42,7 @@ BLENDER_TESTS = (
     ("blender_curves.py", None),
     ("blender_arm_ik.py", None),
     ("blender_agent_ui.py", None),
+    ("blender_motion_library.py", None),
     ("blender_operators.py", None),
 )
 
@@ -62,6 +63,7 @@ def run_suite(blender):
         env = dict(os.environ, BLENDER_USER_RESOURCES=str(root / "CatAniDev" / "profile"), CATANI_TEST_ROOT=str(root))
         env.pop("CATANI_DEMO_NAME", None)
         run_checked([sys.executable, str(root / "tests/test_agent_bridge.py")], env, "test_agent_bridge", root)
+        run_checked([sys.executable, str(root / "tests/test_motion_library.py")], env, "test_motion_library", root)
         for filename, demo_name in BLENDER_TESTS:
             test_env = dict(env)
             if demo_name:
@@ -69,7 +71,7 @@ def run_suite(blender):
             label = filename.removesuffix(".py") + (f":{demo_name}" if demo_name else "")
             run_checked([blender, "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1",
                          "--python", str(bootstrap), "--python", str(root / "tests" / filename)], test_env, label, root)
-    print(json.dumps({"suite": "catani_local", "status": "pass", "checks": len(BLENDER_TESTS) + 1, "live_agent": False}))
+    print(json.dumps({"suite": "catani_local", "status": "pass", "checks": len(BLENDER_TESTS) + 2, "live_agent": False}))
 
 
 def main():

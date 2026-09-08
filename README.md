@@ -1,8 +1,31 @@
 # CatAni
 
-CatAni 0.2.1은 에이전트가 작성한 전신 동작 명세를 Blender의 편집 가능한 곡선으로 실행하는 Extension입니다. 기본 프리셋과 저장된 JSON은 오프라인으로 생성할 수 있으며, 자연어 설계에는 기존 로그인된 Codex CLI를 선택적으로 사용합니다. 별도 API 키를 받지 않지만 Codex 요청은 클라우드 계정의 구독·사용량 조건이 적용됩니다.
+CatAni 0.3.0은 로컬 모션 샘플을 Blender로 가져오고, 필요한 경우 기존 최소 곡선 보정 기능으로 다듬는 방향의 Extension입니다. 절차 코드만으로 자연스러운 인체 동작을 새로 만드는 대신 BVH/FBX 모션 라이브러리를 검색·가져오기 위한 기반을 제공합니다. 기본 프리셋과 저장된 JSON은 오프라인으로 생성할 수 있으며, 자연어 설계에는 기존 로그인된 Codex CLI를 선택적으로 사용합니다. 별도 API 키를 받지 않지만 Codex 요청은 클라우드 계정의 구독·사용량 조건이 적용됩니다.
 
-제공된 샘플 `Blender/Player_Animation_01.blend`의 `Amature_Player` 전용 프로필에서 `natural_wave`(전신 인사), `idle`, `wave`를 생성합니다. 전신 인사는 시선·골반·가슴·쇄골·양팔의 준비와 정착 시점을 달리하고, 인사 중 작은 몸통 호흡을 연결합니다. 양팔과 양다리 IK를 활성화하며, 손목 목표는 움직이는 머리의 앞·옆에 배치합니다. 발 회전 고정 제약을 유지해 골반이 움직여도 발이 바닥에 남도록 합니다. 비교용 기존 단순 동작은 FK 곡선을 사용합니다. 임의 리그, 걷기·점프, 범용 모션 생성은 아직 지원하지 않습니다. 총기처럼 제약으로 연결된 소품은 생성 결과에서 제외하며 원본은 보존합니다.
+제공된 샘플 `Blender/Player_Animation_01.blend`의 `Amature_Player` 전용 프로필에서 `natural_wave`(전신 인사), `idle`, `wave`를 생성하는 기존 기능은 유지합니다. 다만 이 경로는 제한된 제스처 보정용이며, 걷기·점프·앉기 같은 많은 동작은 `motions/` 폴더에 넣은 실제 모션 캡처 샘플을 가져와 리타게팅 기준으로 사용하는 흐름을 우선합니다. 현재 모션 라이브러리 기능은 BVH/FBX 검색과 가져오기까지 제공하며, 선택 리그로 자동 리타게팅하는 단계는 다음 범위입니다.
+
+## 모션 라이브러리 사용
+
+1. 저장소 루트의 `motions/` 폴더를 만들고 BVH 또는 FBX 모션 파일을 넣습니다.
+2. 필요한 경우 `motions/motions.json`에 이름·태그·설명을 기록합니다.
+3. 개발 실행기로 Blender를 열고 3D View의 `N` 사이드바에서 `CatAni` → `CatAni · 로컬 동작` 패널을 엽니다.
+4. **모션 라이브러리 · BVH/FBX 샘플 기반** 영역에서 모션 폴더와 검색어를 지정하고 **모션 목록 갱신**을 누릅니다.
+5. 검색 결과에서 모션을 선택한 뒤 **선택 모션 가져오기**를 누릅니다. 가져온 모션은 `CatAni 모션 원본` 컬렉션에 따로 생성되며, 현재 캐릭터에 바로 덮어쓰지 않습니다.
+
+`motions.json` 예시는 다음과 같습니다.
+
+```json
+{
+  "motions": [
+    {
+      "file": "greeting/friendly_wave.bvh",
+      "name": "친근한 손 인사",
+      "tags": ["wave", "greeting", "friendly"],
+      "description": "상대에게 가볍게 손을 흔드는 전신 모션"
+    }
+  ]
+}
+```
 
 ## 에이전트로 전신 인사 만들기
 
@@ -98,9 +121,11 @@ bash scripts/dev_run.sh --background --python tests/blender_curves.py
 bash scripts/dev_run.sh --background --python tests/blender_natural.py
 bash scripts/dev_run.sh --background --python tests/blender_arm_ik.py
 bash scripts/dev_run.sh --background --python tests/blender_agent_ui.py
+bash scripts/dev_run.sh --background --python tests/blender_motion_library.py
 bash scripts/dev_run.sh --background --python tests/render_preview.py
 bash scripts/dev_run.sh --python tests/gui_preview.py
 python3 tests/test_agent_bridge.py
+python3 tests/test_motion_library.py
 ```
 
 실제 CLI 검사는 기존 Codex 계정의 사용량을 사용합니다. `python3 tests/agent_live.py`로 생성하고 `python3 tests/agent_live.py --refine`으로 현재 명세의 상대적 수정을 검사합니다. `blender_agent_ui.py`는 저장된 실제 응답이 있으면 사용하고, 없으면 `tests/fixtures/natural_wave_plan.json`을 사용합니다. 테스트의 비동기 UI 상태·취소 부분은 가짜 프로세스로 검사하며 CLI 호출 성공과 구분합니다.
@@ -127,19 +152,19 @@ macOS Blender 5.2.0에서 대기·양손 흔들기, 동일 입력 재현, 취소
 
 ## 패키징과 릴리즈 준비
 
-배포 후보 버전은 **0.2.1**입니다. 이전 버전은 로컬 개발 이력이며 공개 릴리스가 아닙니다. Python 3.11 이상과 Blender 5.2.0 이상을 준비하고 저장소 루트에서 실행합니다.
+배포 후보 버전은 **0.3.0**입니다. 이전 버전은 로컬 개발 이력이며 공개 릴리스가 아닙니다. Python 3.11 이상과 Blender 5.2.0 이상을 준비하고 저장소 루트에서 실행합니다.
 
 ```bash
-python3 scripts/validate_release.py --tag v0.2.1
+python3 scripts/validate_release.py --tag v0.3.0
 python3 scripts/run_tests.py
-python3 scripts/package.py --tag v0.2.1
+python3 scripts/package.py --tag v0.3.0
 ```
 
 Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는 `BLENDER_BINARY` 또는 각 실행 명령의 `--blender`로 지정합니다. 전체 검사기는 임시 복사본과 독립 프로필에서 실행하므로 기존 개발 결과를 덮어쓰지 않습니다. 실시간 Codex 호출은 포함하지 않습니다.
 
-`dist/catani-v0.2.1.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보는 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
+`dist/catani-v0.3.0.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 모션 샘플은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
 
-현재 macOS Blender 5.2.0에서 격리 회귀 검사 9개, 배포 무결성 검사 4개, 공식 소스·ZIP 검증을 통과했습니다. ZIP을 별도 프로필에 설치하고 재시작한 뒤 양팔 IK·얼굴 앞쪽 경로 검사도 통과했습니다. 공식 `server-generate`로 생성한 인덱스의 버전·자산 URL·SHA-256 일치를 확인했습니다. Windows/Linux 원격 CI와 실제 Pages 원격 설치는 아직 실행하지 않았습니다.
+현재 macOS Blender 5.2.0에서 격리 회귀 검사 11개, 배포 무결성 검사 4개, 공식 소스·ZIP 검증을 통과했습니다. BVH는 합성 테스트 파일로 실제 Blender 가져오기를 확인했고, FBX는 인덱스·검색 경로만 검사했습니다. Windows/Linux 원격 CI와 실제 Pages 원격 설치는 아직 실행하지 않았습니다.
 
 ### GitHub 배포 구성
 
@@ -151,7 +176,7 @@ Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는
 | `.github/workflows/release.yml` | 새 `v*` 태그 push | 동일 CI 성공 및 버전 일치 후 ZIP·SHA-256 Release 게시 |
 | `.github/workflows/pages.yml` | Release 워크플로 성공, 수동 | 공개 정식 릴리스의 검증된 ZIP으로 공식 `server-generate` 실행 및 Pages 게시 |
 
-실제 배포 단계에서는 공개 저장소 생성과 최초 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 설정합니다. 양쪽 OS의 원격 CI, Windows 개발 실행기, ZIP 설치 및 실제 재생을 확인한 뒤 사용하지 않은 `v0.2.1` 태그로 초기 릴리스를 시작합니다. 기존 태그나 릴리스를 덮어쓰지 않습니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올립니다.
+실제 배포 단계에서는 공개 저장소 생성과 최초 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 설정합니다. 양쪽 OS의 원격 CI, Windows 개발 실행기, ZIP 설치 및 실제 재생을 확인한 뒤 사용하지 않은 `v0.3.0` 태그로 초기 릴리스를 시작합니다. 기존 태그나 릴리스를 덮어쓰지 않습니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올립니다.
 
 배포 후 사용할 원격 저장소 주소는 `https://zzamjak-cloud.github.io/CatAni-Blender/index.json`입니다. **아직 활성화된 설치 주소가 아닙니다.** Pages 게시 후 HTTP 응답·버전·ZIP 다운로드와 별도의 깨끗한 프로필에서 원격 설치를 확인해야 합니다.
 

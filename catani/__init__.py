@@ -8,6 +8,8 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from .core import MotionSpec
 from . import engine
+from .motion_library import assets_from_json, assets_to_json, default_library_path, scan_library, search_assets
+from .motion_import import import_asset
 from .agent_plan import DEFAULT_PLAN, parse_plan
 from .agent_bridge import AgentJob
 
@@ -67,6 +69,11 @@ class CatAniSettings(bpy.types.PropertyGroup):
     codex_path: StringProperty(name="Codex 실행 파일", subtype="FILE_PATH")
     plan_json: StringProperty(name="검토할 동작 명세", default=json.dumps(DEFAULT_PLAN, ensure_ascii=False))
     agent_status: StringProperty(name="상태", default="기본 전신 인사 프리셋 · 에이전트 호출 없이 미리보기 가능")
+    motion_library_path: StringProperty(name="모션 폴더", subtype="DIR_PATH", default=str(default_library_path()))
+    motion_query: StringProperty(name="검색", default="")
+    motion_index_json: StringProperty(name="모션 인덱스", default="[]", options={"HIDDEN"})
+    motion_selected_id: StringProperty(name="선택 모션", default="", options={"HIDDEN"})
+    motion_status: StringProperty(name="모션 상태", default="motions 폴더에 BVH/FBX를 넣고 목록을 갱신하세요.")
 
 
 class CATANI_OT_agent_generate(bpy.types.Operator):
@@ -144,6 +151,68 @@ class CATANI_OT_plan_export(bpy.types.Operator, ExportHelper):
                 json.dump(plan, stream, ensure_ascii=False, indent=2)
         except Exception as error:
             self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class CATANI_OT_motion_refresh(bpy.types.Operator):
+    bl_idname = "catani.motion_refresh"
+    bl_label = "모션 목록 갱신"
+    bl_description = "로컬 BVH/FBX 폴더를 다시 읽고 검색 결과를 갱신합니다"
+
+    def execute(self, context):
+        settings = context.scene.catani_settings
+        try:
+            assets = search_assets(scan_library(bpy.path.abspath(settings.motion_library_path)), settings.motion_query)
+            settings.motion_index_json = assets_to_json(assets)
+            settings.motion_selected_id = assets[0].identifier if assets else ""
+            settings.motion_status = f"검색 결과 {len(assets)}개" if assets else "검색된 BVH/FBX 모션이 없습니다."
+        except Exception as error:
+            self.report({"ERROR"}, str(error))
+            settings.motion_status = str(error)[:250]
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class CATANI_OT_motion_pick(bpy.types.Operator):
+    bl_idname = "catani.motion_pick"
+    bl_label = "모션 선택"
+    bl_description = "가져올 모션 샘플을 선택합니다"
+
+    asset_id: StringProperty(options={"HIDDEN"})
+
+    def execute(self, context):
+        settings = context.scene.catani_settings
+        assets = assets_from_json(settings.motion_index_json)
+        if not any(asset.identifier == self.asset_id for asset in assets):
+            self.report({"ERROR"}, "선택한 모션이 현재 검색 결과에 없습니다.")
+            return {"CANCELLED"}
+        settings.motion_selected_id = self.asset_id
+        settings.motion_status = "모션을 선택했습니다. 가져오기 후 리타게팅 기준으로 사용하세요."
+        return {"FINISHED"}
+
+
+class CATANI_OT_motion_import(bpy.types.Operator):
+    bl_idname = "catani.motion_import"
+    bl_label = "선택 모션 가져오기"
+    bl_description = "선택한 BVH/FBX 모션을 별도 컬렉션으로 가져옵니다. 현재 리그에는 아직 자동 적용하지 않습니다"
+
+    @classmethod
+    def poll(cls, context):
+        return engine.get_session() is None and context.mode == "OBJECT"
+
+    def execute(self, context):
+        settings = context.scene.catani_settings
+        try:
+            assets = assets_from_json(settings.motion_index_json)
+            asset = next((item for item in assets if item.identifier == settings.motion_selected_id), assets[0] if assets else None)
+            if asset is None:
+                raise ValueError("가져올 모션이 없습니다. 먼저 목록을 갱신하세요.")
+            import_asset(context, asset)
+            settings.motion_status = f"{asset.name} 가져오기 완료 · 리타게팅 기준 모션으로 사용하세요."
+        except Exception as error:
+            self.report({"ERROR"}, str(error))
+            settings.motion_status = str(error)[:250]
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -278,9 +347,29 @@ class CATANI_PT_main(bpy.types.Panel):
                 layout.prop(settings, "repeat")
             layout.operator("catani.preview", icon="PLAY")
             layout.label(text="오브젝트 모드에서 리그를 선택하세요")
+        library = layout.box()
+        library.label(text="모션 라이브러리 · BVH/FBX 샘플 기반", icon="FILE_FOLDER")
+        library.prop(settings, "motion_library_path")
+        library.prop(settings, "motion_query")
+        library.operator("catani.motion_refresh", icon="FILE_REFRESH")
+        try:
+            assets = assets_from_json(settings.motion_index_json)
+        except Exception:
+            assets = []
+        for asset in assets[:6]:
+            row = library.row(align=True)
+            icon = "RADIOBUT_ON" if asset.identifier == settings.motion_selected_id else "RADIOBUT_OFF"
+            operator = row.operator("catani.motion_pick", text=asset.name[:32], icon=icon)
+            operator.asset_id = asset.identifier
+            row.label(text=", ".join(asset.tags[:3]))
+        if len(assets) > 6:
+            library.label(text=f"외 {len(assets) - 6}개 · 검색어를 좁히세요")
+        library.operator("catani.motion_import", icon="IMPORT")
+        for line in textwrap.wrap(settings.motion_status, 32):
+            library.label(text=line)
 
 
-_classes = (CatAniSettings, CATANI_OT_agent_generate, CATANI_OT_agent_cancel, CATANI_OT_plan_default, CATANI_OT_plan_import, CATANI_OT_plan_export, CATANI_OT_inspect, CATANI_OT_preview, CATANI_OT_confirm, CATANI_OT_cancel, CATANI_PT_main)
+_classes = (CatAniSettings, CATANI_OT_agent_generate, CATANI_OT_agent_cancel, CATANI_OT_plan_default, CATANI_OT_plan_import, CATANI_OT_plan_export, CATANI_OT_motion_refresh, CATANI_OT_motion_pick, CATANI_OT_motion_import, CATANI_OT_inspect, CATANI_OT_preview, CATANI_OT_confirm, CATANI_OT_cancel, CATANI_PT_main)
 
 
 def register():

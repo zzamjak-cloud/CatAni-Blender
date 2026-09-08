@@ -13,7 +13,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_FILES = (
-    "__init__.py", "core.py", "engine.py", "natural.py", "agent_plan.py", "agent_bridge.py",
+    "__init__.py", "core.py", "engine.py", "natural.py", "agent_plan.py", "agent_bridge.py", "motion_library.py", "motion_import.py",
     "blender_manifest.toml",
 )
 
@@ -67,7 +67,7 @@ def validate(root=ROOT, tag=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     default_tag = os.environ.get("GITHUB_REF_NAME") if os.environ.get("GITHUB_REF_TYPE") == "tag" else None
-    parser.add_argument("--tag", default=default_tag, help="릴리스 태그(예: v0.2.1); GitHub 태그 실행 시 자동 감지")
+    parser.add_argument("--tag", default=default_tag, help="릴리스 태그(예: v0.3.0); GitHub 태그 실행 시 자동 감지")
     args = parser.parse_args()
     validate(tag=args.tag)
 
