@@ -61,6 +61,21 @@ def published_assets(repository):
         page += 1
 
 
+def newest_release(repository):
+    """게시된 정식 릴리스 중 버전이 가장 높은 하나만 돌려준다.
+
+    Blender의 v1 저장소 인덱스는 패키지 id마다 항목이 하나여야 한다. 여러 버전을
+    함께 실으면 클라이언트가 마지막 항목을 설치 대상으로 삼아, 새 버전을 쓰는
+    사용자에게 예전 버전으로 내려가는 갱신을 제안한다.
+    """
+    best = None
+    for tag, archive, checksum in published_assets(repository):
+        version = tuple(int(part) for part in tag[1:].split("."))
+        if best is None or version > best[0]:
+            best = (version, tag, archive, checksum)
+    return best[1:] if best else None
+
+
 def validate_archive(path, version, checksum):
     fields = checksum.strip().split()
     if len(fields) != 2 or fields[1].lstrip("*") != path.name:
@@ -80,6 +95,9 @@ def rewrite_index(index, assets):
     entries = index.get("data", [])
     if len(entries) != len(assets) or not entries:
         raise RuntimeError("공식 저장소 생성 결과에서 호환 릴리스가 누락되었습니다.")
+    identifiers = [entry.get("id") for entry in entries]
+    if len(set(identifiers)) != len(identifiers):
+        raise RuntimeError(f"저장소 인덱스에 같은 id가 여러 번 들어 있습니다: {identifiers}")
     seen = set()
     for entry in entries:
         filename = Path(urllib.parse.urlparse(entry["archive_url"]).path).name
@@ -103,18 +121,18 @@ def main():
     archives.mkdir()
     assets = {}
     prefix = f"https://github.com/{repository}/releases/download/"
-    for tag, archive, checksum in published_assets(repository):
-        for asset in (archive, checksum):
-            if not asset["browser_download_url"].startswith(prefix):
-                raise RuntimeError("저장소 외부 릴리스 자산 URL을 거부했습니다.")
-        path = archives / archive["name"]
-        if path.name in assets:
-            raise RuntimeError(f"릴리스 자산 중복: {path.name}")
-        download(archive["browser_download_url"], path)
-        digest = validate_archive(path, tag[1:], download(checksum["browser_download_url"]).decode("utf-8"))
-        assets[path.name] = {"url": archive["browser_download_url"], "sha256": digest}
-    if not assets:
+    latest = newest_release(repository)
+    if latest is None:
         raise RuntimeError("배포된 정식 CatAni ZIP이 없어 Pages를 갱신하지 않습니다.")
+    tag, archive, checksum = latest
+    for asset in (archive, checksum):
+        if not asset["browser_download_url"].startswith(prefix):
+            raise RuntimeError("저장소 외부 릴리스 자산 URL을 거부했습니다.")
+    path = archives / archive["name"]
+    download(archive["browser_download_url"], path)
+    digest = validate_archive(path, tag[1:], download(checksum["browser_download_url"]).decode("utf-8"))
+    assets[path.name] = {"url": archive["browser_download_url"], "sha256": digest}
+    print(json.dumps({"published": tag, "archive": path.name, "sha256": digest}, ensure_ascii=False))
     subprocess.run([
         os.environ["BLENDER_BINARY"], "--background", "--factory-startup",
         "--command", "extension", "server-generate", "--repo-dir", str(archives),
