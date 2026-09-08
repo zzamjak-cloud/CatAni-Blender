@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tomllib
 import urllib.parse
@@ -13,14 +14,29 @@ import urllib.request
 import zipfile
 
 
+USER_AGENT = "CatAni-CI/1.0 (+https://github.com/zzamjak-cloud/CatAni-Blender)"
+
+
 def request_json(url):
     request = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": USER_AGENT,
     })
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.load(response)
+
+
+def download(url, destination=None):
+    """기본 Python-urllib User-Agent를 거부하는 배포 서버가 있어 항상 지정한다."""
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=180) as response:
+        if destination is None:
+            return response.read()
+        with open(destination, "wb") as stream:
+            shutil.copyfileobj(response, stream)
+    return None
 
 
 def published_assets(repository):
@@ -94,9 +110,8 @@ def main():
         path = archives / archive["name"]
         if path.name in assets:
             raise RuntimeError(f"릴리스 자산 중복: {path.name}")
-        urllib.request.urlretrieve(archive["browser_download_url"], path)
-        with urllib.request.urlopen(checksum["browser_download_url"], timeout=60) as response:
-            digest = validate_archive(path, tag[1:], response.read().decode("utf-8"))
+        download(archive["browser_download_url"], path)
+        digest = validate_archive(path, tag[1:], download(checksum["browser_download_url"]).decode("utf-8"))
         assets[path.name] = {"url": archive["browser_download_url"], "sha256": digest}
     if not assets:
         raise RuntimeError("배포된 정식 CatAni ZIP이 없어 Pages를 갱신하지 않습니다.")
