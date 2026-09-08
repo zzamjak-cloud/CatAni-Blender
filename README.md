@@ -174,11 +174,11 @@ Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는
 
 `dist/catani-v0.5.1.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스와 기본 데모 BVH만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 다운로드된 CMU 모션 파일은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
 
-현재 macOS Blender 5.2.0에서 격리 회귀 검사 10개, 배포 무결성 검사 4개, ZIP 독립 런타임 검증을 통과했습니다. BVH는 합성 테스트 파일로 실제 Blender 가져오기를 확인했고, FBX는 인덱스·검색 경로만 검사했습니다. Windows/Linux 원격 CI와 실제 Pages 원격 설치는 아직 실행하지 않았습니다.
+macOS Blender 5.2.0 로컬, 그리고 GitHub Actions의 Ubuntu·Windows 원격 CI에서 격리 회귀 검사 10개, 배포 무결성 검사 4개, ZIP 독립 런타임 검증을 모두 통과했습니다. BVH는 합성 테스트 파일과 실제 CMU 데이터로 Blender 가져오기·리타게팅을 확인했고, FBX는 인덱스·검색 경로만 검사했습니다. Pages 원격 저장소 등록·동기화·설치·업데이트는 깨끗한 인수 프로필에서 실제로 확인했습니다.
 
 ### GitHub 배포 구성
 
-예정 저장소는 `zzamjak-cloud/CatAni-Blender`입니다. 현재는 로컬 Git과 워크플로 설정을 준비한 상태이며 공개 저장소·Release·Pages는 아직 생성하지 않았습니다.
+공개 저장소는 [`zzamjak-cloud/CatAni-Blender`](https://github.com/zzamjak-cloud/CatAni-Blender)입니다. `v0.5.0`과 `v0.5.1` Release, GitHub Pages 원격 저장소가 모두 게시되어 있습니다.
 
 | 워크플로 | 실행 조건 | 수행 내용 |
 | --- | --- | --- |
@@ -186,8 +186,16 @@ Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는
 | `.github/workflows/release.yml` | 새 `v*` 태그 push | 동일 CI 성공 및 버전 일치 후 ZIP·SHA-256 Release 게시 |
 | `.github/workflows/pages.yml` | Release 워크플로 성공, 수동 | 공개 정식 릴리스의 검증된 ZIP으로 공식 `server-generate` 실행 및 Pages 게시 |
 
-실제 배포 단계에서는 공개 저장소 생성과 최초 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 설정합니다. 양쪽 OS의 원격 CI, Windows 개발 실행기, ZIP 설치 및 실제 재생을 확인한 뒤 사용하지 않은 `v0.5.1` 태그로 초기 릴리스를 시작합니다. 기존 태그나 릴리스를 덮어쓰지 않습니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올립니다.
+저장소를 처음 만들 때는 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 한 번 설정해야 합니다. 이 설정 전에는 Pages 워크플로의 빌드 단계는 성공하고 배포 단계만 404로 실패합니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올리고, 새 `v*` 태그만 push합니다. 기존 태그나 릴리스는 덮어쓰지 않습니다.
 
-배포 후 사용할 원격 저장소 주소는 `https://zzamjak-cloud.github.io/CatAni-Blender/index.json`입니다. **아직 활성화된 설치 주소가 아닙니다.** Pages 게시 후 HTTP 응답·버전·ZIP 다운로드와 별도의 깨끗한 프로필에서 원격 설치를 확인해야 합니다.
+사용자용 원격 저장소 주소는 다음과 같습니다.
+
+```text
+https://zzamjak-cloud.github.io/CatAni-Blender/index.json
+```
+
+깨끗한 인수 프로필에서 다음을 확인했습니다: 저장소 등록 → 동기화(원격이 `0.5.0`·`0.5.1` 두 버전을 알림) → 0.5.0 설치 → 0.5.1로 교체 → 카탈로그 485종 로드 → 한국어·영어 검색(`발차기` 14건, `walk` 130건, `점프` 14건) → 동봉 예제로 실제 리타게팅. Release 자산의 SHA-256은 `index.json`에 적힌 값과 실제 다운로드 바이트에서 모두 일치했습니다.
+
+Blender의 **Check for Updates on Startup**은 원격 저장소에서 설치한 확장을 대상으로 동작합니다. ZIP을 **Install from Disk**로 넣은 경우 Blender가 파일 설치본을 원격 갱신 대상으로 잡지 않으므로, 자동 업데이트를 쓰려면 원격 저장소를 등록해 설치하세요.
 
 사용자는 Blender **Preferences → Get Extensions → Repositories → Add Remote Repository**에 위 주소를 등록합니다. **Check for Updates on Startup**을 켜면 시작 시 업데이트를 확인하며 설치는 사용자가 승인합니다. 개발용 소스 연결 프로필과 사용자용 원격 설치 프로필을 분리합니다.
