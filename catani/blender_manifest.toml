@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+id = "catani"
+version = "0.2.1"
+name = "CatAni"
+tagline = "에이전트 명세와 최소 곡선으로 전신 인사 생성"
+maintainer = "CatAni"
+type = "add-on"
+blender_version_min = "5.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Animation", "Rigging"]
+
+[permissions]
+files = "동작 JSON 명세 가져오기·내보내기와 Codex CLI 임시 파일"
+network = "선택한 경우 기존 Codex 로그인으로 동작 요청 텍스트 전송"

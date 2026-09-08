@@ -1,0 +1,24 @@
+# 로컬 도구와 개발 프로필
+.serena/
+.blender-dev/
+.blender-package/
+.blender-ci/
+.codex/
+.env
+.env.*
+
+# 재생성 가능한 결과와 패키지
+artifacts/
+dist/
+build/
+site/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.blend[0-9]
+*.blend@
+.DS_Store
+
+# 개인 편집기 설정
+.idea/
+.vscode/

@@ -1,0 +1,45 @@
+name: CatAni 릴리스
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catani-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+  publish:
+    name: 검사 완료 ZIP 공개
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 검증된 자산 내려받기
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: catani-release-package
+          path: dist
+      - name: 자산 무결성 검사
+        working-directory: dist
+        run: sha256sum --check ./*.sha256
+      - name: 새로운 릴리스 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$RELEASE_TAG"
+          "dist/catani-${RELEASE_TAG}.zip"
+          "dist/catani-${RELEASE_TAG}.zip.sha256"
+          --verify-tag --title "CatAni ${RELEASE_TAG}"
+          --notes '격리 Blender 및 Windows/Linux 회귀 검사를 통과한 CatAni Extension입니다. 설치 방법과 지원 범위는 README를 확인하세요.'
