@@ -240,6 +240,7 @@ class CATANI_PT_main(bpy.types.Panel):
                 box.label(text="한 손 전신 인사 전용 · 양발 접촉 유지")
                 box.label(text="팔 IK · 손목 위치와 팔꿈치 방향 제어")
                 box.label(text="손 경로 편집: IK_Arm.L / IK_Arm.R")
+                box.label(text="팔꿈치 편집: IK_Pole_Arm.L / R")
                 box.label(text="기존 Codex 계정 사용량 사용 · 요청만 전송")
                 box.prop(settings, "prompt")
                 box.prop(settings, "codex_path")

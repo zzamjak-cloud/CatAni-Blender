@@ -117,6 +117,36 @@ def _ground_feet(rig, session):
                 constraint.iterations = 500
 
 
+def _arm_pole_rest(upper, forearm):
+    """레스트 팔꿈치 평면과 본 roll에서 폴 위치·보정각을 계산한다."""
+    shoulder = upper.bone.head_local
+    elbow = forearm.bone.head_local
+    wrist = forearm.bone.tail_local
+    along = (wrist - shoulder).normalized()
+    bend = elbow - shoulder - along * (elbow - shoulder).dot(along)
+    if bend.length < 1e-5:
+        raise ValueError(f"팔꿈치의 레스트 굽힘이 부족하여 폴 방향을 정할 수 없습니다: {forearm.name}")
+    pole = elbow + bend.normalized() * (upper.bone.length + forearm.bone.length) * 0.4
+    bone_axis = (upper.bone.tail_local - shoulder).normalized()
+    normal = (wrist - shoulder).cross(bend)
+    projected = normal.cross(bone_axis).normalized()
+    transverse = upper.bone.matrix_local.col[0].to_3d().normalized()
+    angle = -math.atan2(bone_axis.dot(transverse.cross(projected)), transverse.dot(projected))
+    return pole, angle
+
+
+def _pole_envelope(phase, start, peak, release, end):
+    if phase <= start or phase >= end:
+        return 0.0, 0.0
+    if phase < peak:
+        value = (phase - start) / (peak - start)
+        return value * value * (3.0 - 2.0 * value), 6.0 * value * (1.0 - value) / (peak - start)
+    if phase <= release:
+        return 1.0, 0.0
+    value = (end - phase) / (end - release)
+    return value * value * (3.0 - 2.0 * value), -6.0 * value * (1.0 - value) / (end - release)
+
+
 def _control_arms(context, rig, session, spec):
     """손목 컨트롤러를 키잉하고 팔 IK·팔꿈치 폴·손목 방향을 유지한다."""
     from .natural import hand_target_knots
@@ -167,22 +197,47 @@ def _control_arms(context, rig, session, spec):
                 local_knots[component].append((phase, values[component], left[component], right[component]))
         for component in range(3):
             _write_curve(channelbag, controller.path_from_id("location"), component, local_knots[component], spec, controller.name)
-        pole = bpy.data.objects.new(f"CatAni 팔꿈치 폴 {side}", None)
-        session["collection"].objects.link(pole)
-        session["copies"].append(pole)
-        pole.parent = rig
-        pole.location = shoulder + Vector((sign * length * 0.55, -length * 0.35, -length * 0.2))
-        pole.empty_display_size = 0.04
-        pole.hide_render = True
-        pole.hide_set(True)
+        pole = rig.pose.bones[f"IK_Pole_Arm.{side}"]
+        pole.bone.hide = False
+        pole.lock_location = (False, False, False)
+        rest_pole, pole_angle = _arm_pole_rest(upper, forearm)
+        if side == spec.side:
+            goal_pole = shoulder + Vector((sign * length * 0.55, -length * 0.35, -length * 0.2))
+            timing = (spec.plan["anticipation"] * 0.65, raised, release, 0.98)
+        else:
+            goal_pole = rest_pole + Vector((sign * length * 0.02, -length * 0.06, 0.0))
+            timing = (0.02, spec.plan["anticipation"] + 0.04, release - 0.03, 0.99)
+        pole_basis = pole.bone.matrix_local.to_quaternion().inverted()
+        controller_basis = controller.bone.matrix_local.to_quaternion()
+        pole_knots = [[], [], []]
+        for index, knot in enumerate(local_knots[0]):
+            phase = knot[0]
+            factor, derivative = _pole_envelope(phase, *timing)
+            desired = rest_pole.lerp(goal_pole, factor)
+            velocity = (goal_pole - rest_pole) * derivative
+            # 폴의 부모인 손목 컨트롤러 이동분을 빼서 의도한 팔꿈치 평면을 유지한다.
+            parent_shift = controller_basis @ Vector([channel[index][1] for channel in local_knots])
+            parent_left = controller_basis @ Vector([channel[index][2] for channel in local_knots])
+            parent_right = controller_basis @ Vector([channel[index][3] for channel in local_knots])
+            values = pole_basis @ (desired - pole.bone.head_local - parent_shift)
+            left = pole_basis @ (velocity - parent_left)
+            right = pole_basis @ (velocity - parent_right)
+            for component in range(3):
+                pole_knots[component].append((phase, values[component], left[component], right[component]))
+        for component in range(3):
+            _write_curve(channelbag, pole.path_from_id("location"), component, pole_knots[component], spec, pole.name)
         for constraint in forearm.constraints:
             if constraint.type == "IK":
-                constraint.pole_target = pole
-                constraint.pole_subtarget = ""
+                constraint.pole_target = rig
+                constraint.pole_subtarget = pole.name
+                constraint.pole_angle = pole_angle
                 constraint.use_stretch = False
                 constraint.iterations = 500
         upper.ik_stretch = 0.0
         forearm.ik_stretch = 0.0
+        for bone in (upper, forearm):
+            bone.lock_ik_x = bone.lock_ik_y = bone.lock_ik_z = False
+            bone.use_ik_limit_x = bone.use_ik_limit_y = bone.use_ik_limit_z = False
         orientation_helper = bpy.data.objects.new(f"CatAni 손목 방향 {side}", None)
         session["collection"].objects.link(orientation_helper)
         session["copies"].append(orientation_helper)
@@ -267,6 +322,11 @@ def begin_preview(context, source, spec):
     errors = inspect_rig(source)
     if spec.recipe == "natural_wave" and source and source.type == "ARMATURE":
         for side in ("L", "R"):
+            pole = source.pose.bones.get(f"IK_Pole_Arm.{side}")
+            if pole is None:
+                errors.append(f"전신 인사 필수 팔 폴 없음: IK_Pole_Arm.{side}")
+            elif pole.parent is None or pole.parent.name != f"IK_Arm.{side}":
+                errors.append(f"팔 폴의 부모는 IK_Arm.{side}여야 합니다: {pole.name}")
             for name in (f"thigh.{side}", f"shin.{side}", f"foot.{side}"):
                 if name not in source.pose.bones:
                     errors.append(f"전신 인사 필수 뼈 없음: {name}")
@@ -339,9 +399,9 @@ def begin_preview(context, source, spec):
         animated_bones = set(sparse_channels(spec))
         for bone in rig.pose.bones:
             bone.location = (0, 0, 0)
-            bone.rotation_quaternion = (1, 0, 0, 0)
             if bone.name not in animated_bones:
                 bone.rotation_mode = "QUATERNION"
+            bone.rotation_quaternion = (1, 0, 0, 0)
             bone.scale = (1, 1, 1)
             for constraint in bone.constraints:
                 for attr in ("target", "pole_target"):
