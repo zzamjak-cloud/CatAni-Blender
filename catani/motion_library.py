@@ -1,4 +1,4 @@
-"""로컬 모션 샘플 라이브러리 인덱스와 가져오기 보조 함수."""
+"""공개 카탈로그와 로컬 파일을 한 목록으로 합치는 모션 인덱스."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,45 +6,47 @@ import json
 import re
 import hashlib
 
+from .source_catalog import CATALOG
+
 
 SUPPORTED_EXTENSIONS = {".bvh", ".fbx"}
 DEFAULT_MOTION_DIR = "motions"
+TEXT_FIELDS = ("name", "description", "source_name", "source_url", "license_note", "license_url", "download_url", "sha256", "blob_sha1")
 
 
 @dataclass(frozen=True)
 class MotionAsset:
+    """목록의 한 줄. available=False면 아직 받지 않은 공개 모션이다."""
+
     identifier: str
     name: str
     path: str
     file_type: str
-    tags: tuple[str, ...]
+    tags: tuple[str, ...] = ()
     description: str = ""
     source_name: str = ""
     source_url: str = ""
     license_note: str = ""
     license_url: str = ""
-
-    def to_dict(self):
-        return {
-            "id": self.identifier,
-            "name": self.name,
-            "path": self.path,
-            "file_type": self.file_type,
-            "tags": list(self.tags),
-            "description": self.description,
-            "source_name": self.source_name,
-            "source_url": self.source_url,
-            "license_note": self.license_note,
-            "license_url": self.license_url,
-        }
+    download_url: str = ""
+    sha256: str = ""
+    blob_sha1: str = ""
+    source_id: str = ""
+    size_bytes: int = 0
+    available: bool = True
 
 
 def addon_root():
     return Path(__file__).resolve().parents[1]
 
 
-def default_library_path():
+def bundled_library_path():
+    """애드온에 동봉한 읽기 전용 예제 모션 폴더."""
     return addon_root() / DEFAULT_MOTION_DIR
+
+
+def default_library_path():
+    return bundled_library_path()
 
 
 def normalize_tags(value):
@@ -66,7 +68,10 @@ def read_manifest(directory):
     path = Path(directory) / "motions.json"
     if not path.exists():
         return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"motions.json 형식이 잘못되었습니다: {error}") from None
     if not isinstance(data, dict):
         raise ValueError("motions.json 최상위 값은 객체여야 합니다.")
     assets = data.get("motions", [])
@@ -81,9 +86,9 @@ def read_manifest(directory):
             raise ValueError("motions.json의 file은 폴더 내부 상대 경로여야 합니다.")
         if file_name in result:
             raise ValueError(f"motions.json에 파일이 중복되었습니다: {file_name}")
-        for field in ("name", "description", "source_name", "source_url", "license_note", "license_url"):
-            if field in item and not isinstance(item[field], str):
-                raise ValueError(f"motions.json의 {field}는 문자열이어야 합니다.")
+        for name in TEXT_FIELDS:
+            if name in item and not isinstance(item[name], str):
+                raise ValueError(f"motions.json의 {name}는 문자열이어야 합니다.")
         tags = item.get("tags", [])
         if not isinstance(tags, (str, list)) or isinstance(tags, list) and not all(isinstance(tag, str) for tag in tags):
             raise ValueError("motions.json의 tags는 문자열 또는 문자열 배열이어야 합니다.")
@@ -91,21 +96,34 @@ def read_manifest(directory):
     return result
 
 
-def make_asset(filepath, name="", tags="", description="", source_name="", source_url="", license_note="", license_url=""):
+def make_asset(filepath, meta=None):
+    """로컬 파일 하나를 목록 항목으로 만든다. meta는 motions.json 항목이다."""
+    meta = meta or {}
     path = Path(filepath).expanduser().resolve()
     if not path.is_file():
         raise ValueError(f"모션 파일을 찾을 수 없습니다: {path}")
     extension = path.suffix.lower()
     if extension not in SUPPORTED_EXTENSIONS:
         raise ValueError("BVH 또는 FBX 모션 파일만 등록할 수 있습니다.")
-    if not all(isinstance(value, str) for value in (name, description, source_name, source_url, license_note, license_url)):
-        raise ValueError("모션 이름과 설명은 문자열이어야 합니다.")
-    title = name.strip() or path.stem.replace("_", " ").replace("-", " ")
-    identifier = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:20]
-    return MotionAsset(identifier, title, str(path), extension[1:], normalize_tags(tags) or normalize_tags(title), description.strip(), source_name, source_url, license_note, license_url)
+    text = {}
+    for name in TEXT_FIELDS:
+        value = meta.get(name, "")
+        if not isinstance(value, str):
+            raise ValueError(f"모션 {name}는 문자열이어야 합니다.")
+        text[name] = value.strip()
+    title = text.pop("name") or path.stem.replace("_", " ").replace("-", " ")
+    source = next((entry for entry in CATALOG if text["download_url"] and entry.download_url == text["download_url"]), None)
+    return MotionAsset(
+        identifier=hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:20],
+        name=title, path=str(path), file_type=extension[1:],
+        tags=normalize_tags(meta.get("tags", ())) or normalize_tags(title),
+        source_id=source.id if source else "", size_bytes=path.stat().st_size,
+        available=True, **text,
+    )
 
 
 def scan_library(directory):
+    """폴더의 BVH/FBX를 motions.json 정보와 합쳐 정렬된 목록으로 돌려준다."""
     root = Path(directory).expanduser().resolve()
     if not root.exists():
         return []
@@ -114,19 +132,55 @@ def scan_library(directory):
     manifest = read_manifest(root)
     assets = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             continue
-        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        assets.append(make_asset(path, manifest.get(path.relative_to(root).as_posix(), {})))
+    return sorted(assets, key=lambda asset: asset.name)
+
+
+def catalog_assets(directories=(), existing_urls=()):
+    """아직 받지 않은 공개 카탈로그 항목만 목록 형태로 돌려준다."""
+    roots = []
+    for directory in ([directories] if isinstance(directories, (str, Path)) else directories):
+        text = str(directory).strip()
+        if text:
+            roots.append(Path(text).expanduser().resolve())
+    known = set(existing_urls)
+    assets = []
+    for entry in CATALOG:
+        if entry.download_url in known or any((root / entry.local_path).is_file() for root in roots):
             continue
-        relative = path.relative_to(root).as_posix()
-        meta = manifest.get(relative, {})
-        tags = normalize_tags(meta.get("tags", ()))
-        if not tags:
-            tags = normalize_tags(path.stem.replace("_", " ").replace("-", " "))
-        name = str(meta.get("name") or path.stem.replace("_", " ").replace("-", " ")).strip()
-        description = str(meta.get("description") or "").strip()
-        assets.append(make_asset(path, name, tags, description, **{field: meta.get(field, "") for field in ("source_name", "source_url", "license_note", "license_url")}))
-    return assets
+        assets.append(MotionAsset(
+            identifier=f"catalog:{entry.id}", name=entry.name, path="", file_type="bvh",
+            tags=normalize_tags(entry.tags), description=entry.description,
+            source_name=entry.source_name, source_url=entry.source_url,
+            license_note=entry.license_note, license_url=entry.license_url,
+            download_url=entry.download_url, sha256=entry.sha256, blob_sha1=entry.blob_sha1,
+            source_id=entry.id, size_bytes=entry.size_bytes, available=False,
+        ))
+    return sorted(assets, key=lambda asset: asset.name)
+
+
+def browse(directory, query="", extra=()):
+    """받아 둔 모션을 먼저, 아직 받지 않은 공개 모션을 뒤에 놓고 검색한다.
+
+    `extra`는 애드온에 동봉한 예제처럼 읽기 전용으로 함께 훑을 폴더다.
+    """
+    roots = []
+    for candidate in [directory, *([extra] if isinstance(extra, (str, Path)) else extra)]:
+        text = str(candidate).strip()
+        if text and text not in roots:
+            roots.append(text)
+    local = []
+    seen = set()
+    for root in roots:
+        for asset in scan_library(root):
+            if asset.path not in seen:
+                seen.add(asset.path)
+                local.append(asset)
+    local.sort(key=lambda asset: asset.name)
+    remote = catalog_assets(roots, {asset.download_url for asset in local if asset.download_url})
+    return search_assets(local + remote, query)
 
 
 def search_assets(assets, query):
@@ -139,46 +193,3 @@ def search_assets(assets, query):
         if all(token in haystack for token in tokens):
             matches.append(asset)
     return matches
-
-
-def assets_to_json(assets):
-    return json.dumps([asset.to_dict() for asset in assets], ensure_ascii=False)
-
-
-def assets_from_json(text):
-    data = json.loads(text or "[]")
-    result = []
-    if not isinstance(data, list):
-        raise ValueError("모션 인덱스가 배열이 아닙니다.")
-    used_ids = set()
-    for item in data:
-        if not isinstance(item, dict):
-            raise ValueError("모션 인덱스 항목은 객체여야 합니다.")
-        for field in ("id", "name", "path", "file_type"):
-            if not isinstance(item.get(field), str) or not item[field]:
-                raise ValueError(f"모션 인덱스의 {field}가 잘못되었습니다.")
-        if item["file_type"] not in {"bvh", "fbx"} or Path(item["path"]).suffix.lower() != "." + item["file_type"]:
-            raise ValueError("모션 인덱스 형식과 파일 확장자가 일치하지 않습니다.")
-        if not isinstance(item.get("tags", []), list) or not all(isinstance(tag, str) for tag in item.get("tags", [])):
-            raise ValueError("모션 태그는 문자열 배열이어야 합니다.")
-        if not isinstance(item.get("description", ""), str):
-            raise ValueError("모션 설명은 문자열이어야 합니다.")
-        for field in ("source_name", "source_url", "license_note", "license_url"):
-            if not isinstance(item.get(field, ""), str):
-                raise ValueError("모션 출처와 이용 조건은 문자열이어야 합니다.")
-        if item["id"] in used_ids:
-            raise ValueError("모션 인덱스 ID가 중복되었습니다.")
-        used_ids.add(item["id"])
-        result.append(MotionAsset(
-            identifier=str(item["id"]),
-            name=str(item["name"]),
-            path=str(item["path"]),
-            file_type=str(item["file_type"]),
-            tags=tuple(str(tag) for tag in item.get("tags", [])),
-            description=str(item.get("description", "")),
-            source_name=item.get("source_name", ""),
-            source_url=item.get("source_url", ""),
-            license_note=item.get("license_note", ""),
-            license_url=item.get("license_url", ""),
-        ))
-    return result

@@ -40,6 +40,8 @@ BLENDER_TESTS = (
     ("blender_curves.py", None),
     ("blender_ui_contract.py", None),
     ("blender_motion_library.py", None),
+    ("blender_retarget.py", None),
+    ("blender_rig_variants.py", None),
     ("blender_operators.py", None),
 )
 

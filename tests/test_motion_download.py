@@ -29,7 +29,8 @@ class MotionDownloadTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="catani-download-test-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        self.entry = replace(catalog.CATALOG[0], sha256=hashlib.sha256(BVH_BYTES).hexdigest(), size_bytes=len(BVH_BYTES))
+        self.entry = replace(catalog.CATALOG[0], sha256=hashlib.sha256(BVH_BYTES).hexdigest(),
+                             blob_sha1=downloader.git_blob_sha1(BVH_BYTES), size_bytes=len(BVH_BYTES))
         self.requests = []
         forbidden_network = patch.object(downloader, "urlopen", side_effect=AssertionError("기본 회귀 검사에서 실제 네트워크 호출 금지"))
         forbidden_network.start()
@@ -40,7 +41,9 @@ class MotionDownloadTests(unittest.TestCase):
         return MemoryResponse()
 
     def test_catalog_exposes_source_license_and_verifiable_downloads(self):
-        self.assertGreaterEqual(len(catalog.CATALOG), 3)
+        self.assertGreaterEqual(len(catalog.CATALOG), 300, "카탈로그가 충분히 넓지 않습니다")
+        self.assertGreaterEqual(len({entry.category for entry in catalog.CATALOG}), 20, "동작 분류가 부족합니다")
+        self.assertEqual(len({entry.local_path for entry in catalog.CATALOG}), len(catalog.CATALOG))
         self.assertEqual(len({entry.id for entry in catalog.CATALOG}), len(catalog.CATALOG))
         for entry in catalog.CATALOG:
             with self.subTest(source=entry.id):
@@ -50,8 +53,16 @@ class MotionDownloadTests(unittest.TestCase):
                     self.assertIn(parsed.scheme, ("http", "https"))
                     self.assertTrue(parsed.hostname)
                     self.assertNotIn(parsed.hostname, ("example.com", "localhost"))
-                self.assertRegex(entry.sha256, r"^[0-9a-f]{64}$")
+                # 고정 리비전의 git blob 해시나 SHA-256 중 하나 이상으로 검증할 수 있어야 한다.
+                self.assertTrue(entry.blob_sha1 or entry.sha256, "검증 가능한 체크섬이 없습니다")
+                if entry.blob_sha1:
+                    self.assertRegex(entry.blob_sha1, r"^[0-9a-f]{40}$")
+                if entry.sha256:
+                    self.assertRegex(entry.sha256, r"^[0-9a-f]{64}$")
                 self.assertGreater(entry.size_bytes, 0)
+                self.assertLessEqual(entry.size_bytes, catalog.MAX_FILE_BYTES)
+                self.assertIn(urlparse(entry.download_url).hostname, catalog.ALLOWED_HOSTS)
+                self.assertEqual(Path(entry.local_path).suffix.lower(), ".bvh")
                 self.assertFalse(Path(entry.local_path).is_absolute())
                 self.assertNotIn("..", Path(entry.local_path).parts)
                 self.assertEqual(catalog.get_source(entry.id), entry)
@@ -67,6 +78,8 @@ class MotionDownloadTests(unittest.TestCase):
         self.assertEqual(library.search_assets(assets, self.entry.tags[0]), assets)
         manifest = json.loads((self.directory / "motions.json").read_text(encoding="utf-8"))
         metadata = manifest["motions"][0]
+        self.assertEqual(metadata["blob_sha1"], self.entry.blob_sha1)
+        self.assertEqual(metadata["download_url"], self.entry.download_url)
         self.assertEqual(metadata["source_url"], self.entry.source_url)
         self.assertEqual(metadata["license_url"], self.entry.license_url)
         self.assertEqual(metadata["license_note"], self.entry.license_note)
@@ -82,17 +95,29 @@ class MotionDownloadTests(unittest.TestCase):
         self.assertFalse(list(self.directory.rglob("*.part")))
 
     def test_hash_failure_does_not_publish_partial_file_or_index(self):
-        wrong = replace(self.entry, sha256="0" * 64)
-        with self.assertRaises((ValueError, RuntimeError, OSError)):
-            downloader.download_asset(wrong, self.directory, opener=self.opener)
-        self.assertFalse((self.directory / wrong.local_path).exists())
-        self.assertEqual(library.scan_library(self.directory), [])
-        self.assertFalse(list(self.directory.rglob("*.part")))
+        for wrong in (replace(self.entry, sha256="0" * 64), replace(self.entry, blob_sha1="0" * 40)):
+            with self.subTest(entry=wrong.sha256[:4] + wrong.blob_sha1[:4]):
+                with self.assertRaises((ValueError, RuntimeError, OSError)):
+                    downloader.download_asset(wrong, self.directory, opener=self.opener)
+                self.assertFalse((self.directory / wrong.local_path).exists())
+                self.assertEqual(library.scan_library(self.directory), [])
+                self.assertFalse(list(self.directory.rglob("*.part")))
+
+    def test_entry_without_checksum_is_refused(self):
+        naked = replace(self.entry, sha256="", blob_sha1="")
+        with self.assertRaises(ValueError):
+            downloader.download_asset(naked, self.directory, opener=self.opener)
+        self.assertEqual(self.requests, [])
+
+    def test_blob_hash_matches_git_object_format(self):
+        self.assertEqual(downloader.git_blob_sha1(b""), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+        self.assertEqual(downloader.git_blob_sha1(b"hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a")
 
     def test_truncated_or_non_bvh_content_is_not_registered(self):
         cases = ((BVH_BYTES, len(BVH_BYTES) + 1), (b"<html>missing</html>", len(b"<html>missing</html>")))
         for payload, size in cases:
-            entry = replace(self.entry, sha256=hashlib.sha256(payload).hexdigest(), size_bytes=size)
+            entry = replace(self.entry, sha256=hashlib.sha256(payload).hexdigest(),
+                            blob_sha1=downloader.git_blob_sha1(payload), size_bytes=size)
             with self.subTest(payload=payload[:16]), self.assertRaises(ValueError):
                 downloader.download_asset(entry, self.directory, opener=lambda *args, **kwargs: MemoryResponse(payload))
             self.assertFalse((self.directory / entry.local_path).exists())

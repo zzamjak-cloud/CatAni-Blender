@@ -8,6 +8,11 @@
 .env
 .env.*
 
+# 내려받은 공개 모션 데이터. 애드온이 필요할 때 다시 받는다.
+motions/CMU/
+motions/*/
+!motions/demo/
+
 # 재생성 가능한 결과와 패키지
 artifacts/
 dist/

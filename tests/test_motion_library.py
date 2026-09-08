@@ -1,4 +1,4 @@
-"""로컬 모션 라이브러리 인덱스와 검색 계약을 검사한다."""
+"""로컬 파일과 공개 카탈로그를 합친 모션 목록·검색 계약을 검사한다."""
 
 import json
 from pathlib import Path
@@ -12,75 +12,107 @@ package = types.ModuleType("catani")
 package.__path__ = [str(root / "catani")]
 sys.modules["catani"] = package
 
-from catani.motion_library import assets_from_json, assets_to_json, scan_library, search_assets
+from catani.motion_library import browse, catalog_assets, make_asset, scan_library, search_assets
+from catani.source_catalog import CATALOG
 
 
 class MotionLibraryTests(unittest.TestCase):
-    def test_scan_search_and_roundtrip(self):
+    def test_scan_reads_manifest_and_search_narrows(self):
         with tempfile.TemporaryDirectory(prefix="catani-motion-library-") as directory:
-            root = Path(directory)
-            (root / "friendly wave.bvh").write_text("HIERARCHY\n", encoding="utf-8")
-            (root / "friendly-wave.fbx").write_text("FBX\n", encoding="utf-8")
-            (root / "friendly_wave.fbx").write_text("FBX\n", encoding="utf-8")
-            (root / "folder.fbx").mkdir()
-            (root / "ignore.txt").write_text("skip", encoding="utf-8")
-            (root / "motions.json").write_text(json.dumps({
-                "motions": [
-                    {
-                        "file": "friendly wave.bvh",
-                        "name": "친근한 손 인사",
-                        "tags": ["wave", "greeting", "friendly"],
-                        "description": "상대에게 가볍게 인사한다",
-                    }
-                ]
+            library = Path(directory)
+            (library / "friendly wave.bvh").write_text("HIERARCHY\n", encoding="utf-8")
+            (library / "friendly-wave.fbx").write_text("FBX\n", encoding="utf-8")
+            (library / "friendly_wave.fbx").write_text("FBX\n", encoding="utf-8")
+            (library / "folder.fbx").mkdir()
+            (library / "ignore.txt").write_text("skip", encoding="utf-8")
+            (library / "motions.json").write_text(json.dumps({
+                "motions": [{
+                    "file": "friendly wave.bvh",
+                    "name": "친근한 손 인사",
+                    "tags": ["wave", "greeting", "friendly"],
+                    "description": "상대에게 가볍게 인사한다",
+                }]
             }, ensure_ascii=False), encoding="utf-8")
 
-            assets = scan_library(root)
+            assets = scan_library(library)
             self.assertEqual(len(assets), 3)
             self.assertEqual(len({asset.identifier for asset in assets}), 3)
-            self.assertEqual(assets[0].name, "친근한 손 인사")
-            self.assertEqual(assets[0].tags, ("wave", "greeting", "friendly"))
+            named = next(asset for asset in assets if asset.name == "친근한 손 인사")
+            self.assertEqual(named.tags, ("wave", "greeting", "friendly"))
+            self.assertTrue(named.available)
+            self.assertGreater(named.size_bytes, 0)
 
-            matches = search_assets(assets, "wave friendly")
-            self.assertEqual(len(matches), 3)
-            self.assertEqual([asset.name for asset in search_assets(assets, "WAVE\tgreeting")], ["친근한 손 인사"])
-            self.assertEqual(search_assets(assets, "인사,가볍게"), [assets[0]])
+            self.assertEqual(len(search_assets(assets, "wave friendly")), 3)
+            self.assertEqual([a.name for a in search_assets(assets, "WAVE\tgreeting")], ["친근한 손 인사"])
+            self.assertEqual(search_assets(assets, "인사,가볍게"), [named])
             self.assertEqual(search_assets(assets, "없는모션"), [])
 
-            restored = assets_from_json(assets_to_json(matches))
-            self.assertEqual(restored, matches)
+    def test_manifest_records_download_origin(self):
+        entry = CATALOG[0]
+        with tempfile.TemporaryDirectory(prefix="catani-motion-origin-") as directory:
+            library = Path(directory)
+            target = library / entry.local_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("HIERARCHY\n", encoding="utf-8")
+            (library / "motions.json").write_text(json.dumps({"motions": [{
+                "file": entry.local_path, "name": entry.name, "tags": list(entry.tags),
+                "download_url": entry.download_url, "sha256": entry.sha256,
+                "source_name": entry.source_name, "license_note": entry.license_note,
+            }]}, ensure_ascii=False), encoding="utf-8")
+            asset = scan_library(library)[0]
+            self.assertEqual(asset.download_url, entry.download_url)
+            self.assertEqual(asset.sha256, entry.sha256)
+            self.assertEqual(asset.source_id, entry.id, "받아 둔 파일이 카탈로그 항목과 이어지지 않았습니다")
 
-    def test_missing_directory_is_empty(self):
-        with tempfile.TemporaryDirectory(prefix="catani-motion-library-") as directory:
-            self.assertEqual(scan_library(Path(directory) / "missing"), [])
+    def test_browse_offers_catalog_until_downloaded(self):
+        with tempfile.TemporaryDirectory(prefix="catani-motion-browse-") as directory:
+            library = Path(directory)
+            listed = browse(library)
+            self.assertEqual(len(listed), len(CATALOG))
+            self.assertTrue(all(not asset.available and asset.source_id for asset in listed))
+            self.assertTrue(all(asset.size_bytes > 0 for asset in listed))
 
-    def test_empty_directory_and_invalid_manifest(self):
+            entry = CATALOG[0]
+            target = library / entry.local_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("HIERARCHY\n", encoding="utf-8")
+            after = browse(library)
+            self.assertEqual(len(after), len(CATALOG))
+            self.assertEqual(sum(1 for asset in after if asset.available), 1)
+            self.assertEqual([asset.source_id for asset in catalog_assets(library)].count(entry.id), 0)
+            self.assertEqual(len(browse(library, "없는검색어")), 0)
+            self.assertEqual(len(browse("", "")), len(CATALOG), "폴더가 비어 있어도 공개 카탈로그는 보여야 합니다")
+
+    def test_missing_directory_and_invalid_manifest(self):
         with tempfile.TemporaryDirectory(prefix="catani-motion-library-") as directory:
-            root = Path(directory)
-            self.assertEqual(scan_library(root), [])
-            manifest = root / "motions.json"
-            for value in ([], {"motions": {}}, {"motions": ["wave.bvh"]}, {"motions": [{}]}):
+            library = Path(directory)
+            self.assertEqual(scan_library(library / "missing"), [])
+            self.assertEqual(scan_library(library), [])
+            manifest = library / "motions.json"
+            for value in ([], {"motions": {}}, {"motions": ["wave.bvh"]}, {"motions": [{}]},
+                          {"motions": [{"file": "a.bvh", "sha256": 1}]}):
                 manifest.write_text(json.dumps(value), encoding="utf-8")
                 with self.subTest(value=value), self.assertRaises(ValueError):
-                    scan_library(root)
+                    scan_library(library)
             with self.assertRaises(ValueError):
                 scan_library(manifest)
 
-    def test_unicode_names_stable_ids_and_invalid_index(self):
+    def test_unicode_names_and_stable_ids(self):
         with tempfile.TemporaryDirectory(prefix="catani-motion-library-") as directory:
-            root = Path(directory)
+            library = Path(directory)
             for name in ("인사.bvh", "걷기.bvh", "nested/wave.BVH"):
-                path = root / name
+                path = library / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("인덱스 검사용 합성 자리표시자", encoding="utf-8")
-            first = scan_library(root)
+            first = scan_library(library)
             self.assertEqual(len(first), 3)
             self.assertEqual(len({item.identifier for item in first}), 3)
-            self.assertEqual(first, scan_library(root))
-            self.assertEqual(first, assets_from_json(assets_to_json(first)))
-        self.assertEqual(assets_from_json(""), [])
-        with self.assertRaises(ValueError):
-            assets_from_json("{}")
+            self.assertEqual(first, scan_library(library))
+            (library / "skip.gltf").write_text("no", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                make_asset(library / "skip.gltf")
+            with self.assertRaises(ValueError):
+                make_asset(library / "없는파일.bvh")
 
 
 if __name__ == "__main__":

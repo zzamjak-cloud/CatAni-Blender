@@ -10,10 +10,32 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .motion_library import read_manifest
+from .source_catalog import ALLOWED_HOSTS, MAX_FILE_BYTES
 
 
 class DownloadCancelled(Exception):
     """사용자가 다운로드를 취소했다."""
+
+
+def git_blob_sha1(payload):
+    """git이 파일 내용에 부여하는 blob 해시. 카탈로그의 고정 리비전 값과 비교한다."""
+    digest = hashlib.sha1()
+    digest.update(f"blob {len(payload)}\0".encode("ascii"))
+    digest.update(payload)
+    return digest.hexdigest()
+
+
+def verify_payload(entry, payload):
+    """크기·체크섬·BVH 머리말을 모두 확인한다. 어긋나면 ValueError."""
+    if len(payload) != entry.size_bytes:
+        raise ValueError("다운로드 크기가 카탈로그 정보와 다릅니다.")
+    if entry.blob_sha1 and git_blob_sha1(payload) != entry.blob_sha1:
+        raise ValueError("다운로드 blob 체크섬 검증에 실패했습니다. 파일을 다시 받아 주세요.")
+    if entry.sha256 and hashlib.sha256(payload).hexdigest() != entry.sha256:
+        raise ValueError("다운로드 SHA-256 검증에 실패했습니다. 파일을 다시 받아 주세요.")
+    header = payload[:16384]
+    if not header.lstrip().startswith(b"HIERARCHY") or b"MOTION" not in header:
+        raise ValueError("다운로드한 파일이 예상한 BVH 형식이 아닙니다.")
 
 
 def _check_cancel(cancel_event):
@@ -29,7 +51,7 @@ def _write_metadata(entry, root):
         "description": entry.description, "source_name": entry.source_name,
         "source_url": entry.source_url, "license_note": entry.license_note,
         "license_url": entry.license_url, "download_url": entry.download_url,
-        "sha256": entry.sha256,
+        "sha256": entry.sha256, "blob_sha1": entry.blob_sha1,
     }
     temporary = None
     document["motions"] = list(manifest.values())
@@ -53,16 +75,22 @@ def download_asset(entry, library_dir, *, progress=None, cancel_event=None, open
     if not target.is_relative_to(root):
         raise ValueError("다운로드 대상은 선택한 모션 폴더 내부여야 합니다.")
     url = urlparse(entry.download_url)
-    if url.scheme != "https" or url.hostname != "raw.githubusercontent.com":
+    if url.scheme != "https" or url.hostname not in ALLOWED_HOSTS:
         raise ValueError("확인된 HTTPS 공개 데이터 주소만 다운로드할 수 있습니다.")
-    if entry.size_bytes <= 0 or entry.size_bytes > 32 * 1024 * 1024:
+    if entry.size_bytes <= 0 or entry.size_bytes > MAX_FILE_BYTES:
         raise ValueError("카탈로그 파일 크기가 지원 범위를 벗어났습니다.")
+    if not entry.blob_sha1 and not entry.sha256:
+        raise ValueError("체크섬이 없는 항목은 내려받지 않습니다.")
     _check_cancel(cancel_event)
     root.mkdir(parents=True, exist_ok=True)
     read_manifest(root)
     if target.exists():
-        if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != entry.sha256:
+        if not target.is_file():
             raise ValueError(f"다른 내용의 기존 파일을 보호하기 위해 중단했습니다: {target.name}")
+        try:
+            verify_payload(entry, target.read_bytes())
+        except ValueError:
+            raise ValueError(f"다른 내용의 기존 파일을 보호하기 위해 중단했습니다: {target.name}") from None
         _write_metadata(entry, root)
         if progress:
             progress(1.0, "이미 받은 모션을 인덱스에 등록했습니다.")
@@ -74,9 +102,8 @@ def download_asset(entry, library_dir, *, progress=None, cancel_event=None, open
         request = Request(entry.download_url, headers={"User-Agent": "CatAni-Motion-Library", "Accept": "text/plain"})
         with (opener or urlopen)(request, timeout=20) as response, tempfile.NamedTemporaryFile(dir=target.parent, prefix=".catani-download-", suffix=".part", delete=False) as stream:
             temporary = Path(stream.name)
-            digest = hashlib.sha256()
+            chunks = []
             size = 0
-            header = b""
             while True:
                 _check_cancel(cancel_event)
                 chunk = response.read(65536)
@@ -85,16 +112,13 @@ def download_asset(entry, library_dir, *, progress=None, cancel_event=None, open
                 size += len(chunk)
                 if size > entry.size_bytes:
                     raise ValueError("다운로드 크기가 카탈로그 정보와 다릅니다.")
-                header = (header + chunk)[:16384]
-                digest.update(chunk)
+                chunks.append(chunk)
                 stream.write(chunk)
                 if progress:
                     progress(size / entry.size_bytes, f"{entry.name} · {size / 1024:.0f} / {entry.size_bytes / 1024:.0f} KB")
         _check_cancel(cancel_event)
-        if size != entry.size_bytes or digest.hexdigest() != entry.sha256:
-            raise ValueError("다운로드 체크섬 검증에 실패했습니다. 파일을 다시 받아 주세요.")
-        if not header.lstrip().startswith(b"HIERARCHY") or b"MOTION" not in header:
-            raise ValueError("다운로드한 파일이 예상한 BVH 형식이 아닙니다.")
+        # blob 해시는 전체 내용이 필요하다. 카탈로그가 32MB 상한을 강제하므로 메모리에 담아도 안전하다.
+        verify_payload(entry, b"".join(chunks))
         # hard link 생성은 기존 파일이 있으면 실패하므로 경쟁 상황에서도 덮어쓰지 않는다.
         os.link(temporary, target)
         installed = True

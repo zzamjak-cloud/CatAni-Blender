@@ -26,10 +26,31 @@ settings = bpy.context.scene.catani_settings
 settings.motion_library_path = str(repository_path / "catani" / "motions")
 settings.motion_query = ""
 assert bpy.ops.catani.motion_refresh() == {"FINISHED"}
-assert addon.assets_from_json(settings.motion_index_json), "ZIP의 합성 예제 모션을 찾지 못했습니다"
+local = [item for item in settings.motions if item.available]
+assert local, "ZIP의 합성 예제 모션을 찾지 못했습니다"
+settings.motion_active = next(index for index, item in enumerate(settings.motions) if item.available)
 before = set(bpy.data.objects)
-assert bpy.ops.catani.motion_import() == {"FINISHED"}
+assert bpy.ops.catani.motion_import() == {"FINISHED"}, settings.motion_status
 created = set(bpy.data.objects) - before
-assert any(obj.type == "ARMATURE" and obj.animation_data and obj.animation_data.action for obj in created)
+source = next(obj for obj in created if obj.type == "ARMATURE" and obj.animation_data and obj.animation_data.action)
+
+# ZIP만 설치한 상태에서도 리타게팅 경로가 살아 있는지 확인한다.
+armature = bpy.data.armatures.new("ZIP_검사_리그")
+target = bpy.data.objects.new("ZIP_검사_리그", armature)
+bpy.context.scene.collection.objects.link(target)
+bpy.context.view_layer.objects.active = target
+bpy.ops.object.mode_set(mode="EDIT")
+for name, head, tail, parent in (("Hips", (0, 0, 0), (0, 0, 1), None), ("Spine", (0, 0, 1), (0, 0, 2), "Hips")):
+    bone = armature.edit_bones.new(name)
+    bone.head, bone.tail = head, tail
+    if parent:
+        bone.parent = armature.edit_bones[parent]
+bpy.ops.object.mode_set(mode="OBJECT")
+try:
+    addon.retarget.build_pairs(source, target)
+except ValueError as error:
+    assert "지원 규격" in str(error), str(error)
+else:
+    raise AssertionError("본 2개짜리 리그가 최소 매핑 조건을 통과했습니다")
 addon.unregister()
-print("CATANI_PASS 배포 ZIP 독립 등록·Agent 제외·합성 예제 가져오기·등록 해제")
+print("CATANI_PASS 배포 ZIP 독립 등록·Agent 제외·합성 예제 가져오기·리타게팅 모듈 포함·등록 해제")

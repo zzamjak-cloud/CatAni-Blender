@@ -50,6 +50,14 @@ def build(blender, output_dir, tag=None):
             sample_destination = source / name
             sample_destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, sample_destination)
+        # 개발 중 내려받은 모션 기록이 ZIP 인덱스에 섞이지 않게 동봉 파일만 남긴다.
+        index_path = source / "motions/motions.json"
+        document = json.loads(index_path.read_text(encoding="utf-8"))
+        shipped = {name.relative_to("motions").as_posix() for name in MOTION_SAMPLE_FILES if name.suffix != ".json"}
+        document["motions"] = [item for item in document.get("motions", []) if item.get("file") in shipped]
+        if len(document["motions"]) != len(shipped):
+            raise ValueError(f"동봉할 예제 모션 정보가 motions.json에 없습니다: {shipped}")
+        index_path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         shutil.copy2(ROOT / "LICENSE", source / "LICENSE")
         # 체크아웃 시각이나 운영체제 권한 차이가 ZIP 메타데이터에 섞이지 않게 한다.
         for path in source.rglob("*"):

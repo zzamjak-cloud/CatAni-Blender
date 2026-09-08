@@ -1,4 +1,4 @@
-"""실제 등록된 UI에서 제거된 에이전트·JSON 명세 경로가 되살아나지 않는지 검사한다."""
+"""주 패널은 검색·목록·적용만 남고 상세 정보는 팝업에만 있는지 검사한다."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,65 +9,113 @@ from bl_ext.user_default.catani.source_catalog import CATALOG
 
 
 class RecordedLayout:
-    """패널의 실제 draw 경로가 노출하는 연산자와 속성을 기록한다."""
+    """패널과 팝업의 실제 draw 경로가 노출하는 요소를 기록한다."""
 
-    def __init__(self):
-        self.operators = []
-        self.properties = []
-        self.labels = []
-        self.buttons = []
+    def __init__(self, sink=None):
+        self.sink = sink if sink is not None else {"operators": [], "properties": [], "labels": [], "buttons": [], "lists": []}
 
-    def row(self, **kwargs):
-        return self
+    def _child(self):
+        return RecordedLayout(self.sink)
 
-    def column(self, **kwargs):
-        return self
-
-    def box(self):
-        return self
+    row = column = box = split = lambda self, **kwargs: self._child()
 
     def separator(self, **kwargs):
         pass
 
-    def label(self, *, text="", **kwargs):
-        self.labels.append(text)
+    def progress(self, **kwargs):
+        pass
 
-    def prop(self, data, name, **kwargs):
-        self.properties.append(name)
+    def label(self, *, text="", **kwargs):
+        self.sink["labels"].append(text)
+
+    def prop(self, _data, name, **kwargs):
+        self.sink["properties"].append(name)
+
+    def template_list(self, listtype, _identifier, _data, propname, *args, **kwargs):
+        self.sink["lists"].append((listtype, propname))
 
     def operator(self, identifier, **kwargs):
-        self.operators.append(identifier)
+        self.sink["operators"].append(identifier)
         button = SimpleNamespace(identifier=identifier)
-        self.buttons.append(button)
+        self.sink["buttons"].append(button)
         return button
+
+    @property
+    def alignment(self):
+        return "EXPAND"
+
+    @alignment.setter
+    def alignment(self, _value):
+        pass
+
+    def __setattr__(self, name, value):
+        if name in {"scale_y", "scale_x", "enabled", "active", "use_property_split", "alert"}:
+            return
+        object.__setattr__(self, name, value)
+
+
+def record(draw, context):
+    layout = RecordedLayout()
+    draw(SimpleNamespace(layout=layout), context)
+    return layout.sink
 
 
 root = Path(__file__).resolve().parents[1]
 bpy.ops.wm.open_mainfile(filepath=str(root / "Blender/Player_Animation_01.blend"))
+
 for suffix in ("agent_generate", "agent_cancel", "plan_default", "plan_import", "plan_export"):
     assert bpy.types.Operator.bl_rna_get_subclass_py(f"CATANI_OT_{suffix}") is None, f"제거된 연산자가 등록되었습니다: {suffix}"
 settings = bpy.context.scene.catani_settings
-for name in ("prompt", "codex_path", "plan_json", "agent_status"):
+for name in ("prompt", "codex_path", "plan_json", "agent_status", "motion_index_json", "motion_selected_id"):
     assert name not in settings.bl_rna.properties, f"제거된 입력이 남았습니다: {name}"
-if "recipe" in settings.bl_rna.properties:
-    assert "natural_wave" not in settings.bl_rna.properties["recipe"].enum_items.keys()
-try:
-    addon.MotionSpec(recipe="natural_wave")
-except ValueError:
-    pass
-else:
-    raise AssertionError("제거된 자연 인사 명세 경로가 엔진에서 다시 허용되었습니다")
-layout = RecordedLayout()
-addon.CATANI_PT_main.draw(SimpleNamespace(layout=layout), bpy.context)
-assert "catani.motion_refresh" in layout.operators
-assert "catani.motion_import" in layout.operators
-assert "catani.motion_download" in layout.operators
-assert "motion_library_path" in layout.properties
-assert not any(name.startswith(("catani.agent_", "catani.plan_")) for name in layout.operators)
-assert not {"prompt", "codex_path", "plan_json", "agent_status"}.intersection(layout.properties)
-visible_urls = {getattr(button, "url", "") for button in layout.buttons}
-assert any(entry.source_url in visible_urls for entry in CATALOG), "카탈로그 출처 링크가 UI에 없습니다"
-assert any(entry.license_url in visible_urls for entry in CATALOG), "카탈로그 이용 조건 링크가 UI에 없습니다"
+
+main = record(addon.CATANI_PT_main.draw, bpy.context)
+# 주 흐름: 검색 → 목록 → 대상 → 적용.
+assert main["lists"] == [("CATANI_UL_motions", "motions")], main["lists"]
+assert main["properties"] == ["motion_query", "target_armature"], main["properties"]
+assert "catani.motion_apply" in main["operators"], main["operators"]
+assert main["operators"].count("catani.motion_apply") == 1
+# 복잡한 정보와 설정은 주 패널에 없어야 한다.
+for hidden in ("motion_library_path", "frame_step", "use_location", "hide_source", "recipe", "duration", "intensity", "repeat"):
+    assert hidden not in main["properties"], f"상세 설정이 주 패널에 노출되었습니다: {hidden}"
+for hidden in ("catani.motion_download", "catani.motion_import", "catani.motion_refresh", "wm.url_open"):
+    assert hidden not in main["operators"], f"보조 동작이 주 패널에 노출되었습니다: {hidden}"
+joined = " ".join(main["labels"])
+for entry in CATALOG:
+    assert entry.license_note not in joined, "이용 조건 원문이 주 패널에 노출되었습니다"
+    assert entry.source_name not in joined, "출처 문구가 주 패널에 노출되었습니다"
+assert {"catani.motion_info", "catani.settings"} <= set(main["operators"]), main["operators"]
+assert len(main["properties"]) + len(main["operators"]) <= 6, "주 패널 요소가 너무 많습니다"
+
+# 출처 팝업이 실제 다운로드 주소와 이용 조건, 원문 링크를 담는지.
+settings.motion_library_path = ""
+settings.motion_query = ""
+addon.refresh(bpy.context.scene)
+assert len(settings.motions) == len(CATALOG), [item.name for item in settings.motions]
+settings.motion_active = 0
+selected = settings.motions[0]
+info = record(addon.CATANI_OT_motion_info.draw, bpy.context)
+text = " ".join(info["labels"])
+# 긴 주소는 팝업 폭에 맞춰 여러 줄로 접히므로 공백을 없애고 이어 붙여 검사한다.
+packed = text.replace(" ", "")
+assert selected.download_url in packed, "팝업에 실제 다운로드 주소가 없습니다"
+checksum = selected.blob_sha1 or selected.sha256
+assert checksum and checksum in packed, "팝업에 체크섬이 없습니다"
+assert selected.license_note.split(".")[0].replace(" ", "") in packed, "팝업에 이용 조건이 없습니다"
+urls = {getattr(button, "url", "") for button in info["buttons"]}
+assert selected.source_url in urls and selected.license_url in urls, urls
+
+# 상세 팝업이 폴더·굽기 옵션·리포트와 보조 연산자를 담는지.
+detail = record(addon.CATANI_OT_settings.draw, bpy.context)
+assert {"motion_library_path", "frame_step", "use_location", "hide_source"} <= set(detail["properties"]), detail["properties"]
+assert {"catani.motion_refresh", "catani.motion_download", "catani.motion_import"} <= set(detail["operators"]), detail["operators"]
+assert any("적용 리포트" in label for label in detail["labels"]), detail["labels"]
+
+# 절차 동작은 접힌 보조 패널에만 남는다.
+assert addon.CATANI_PT_procedural.bl_options == {"DEFAULT_CLOSED"}
+procedural = record(addon.CATANI_PT_procedural.draw, bpy.context)
+assert {"recipe", "duration", "intensity", "repeat"} <= set(procedural["properties"]), procedural["properties"]
+
 addon.unregister()
 addon.register()
-print("CATANI_PASS 모션 라이브러리 UI 유지·에이전트와 JSON 명세 UI 제거·재등록")
+print("CATANI_PASS 주 패널 단순화·상세 정보 팝업 격리·재등록")

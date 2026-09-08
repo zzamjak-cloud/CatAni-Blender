@@ -33,7 +33,7 @@ def _has_animation(obj):
 
 
 def import_asset(context, asset):
-    """성공 시 생성 오브젝트 목록을 반환하고 실패 시 생성 데이터 전체를 정리한다."""
+    """성공 시 (생성 오브젝트, 컬렉션)을 반환하고 실패 시 생성 데이터 전체를 정리한다."""
     if context.mode != "OBJECT":
         raise ValueError("모션 가져오기는 오브젝트 모드에서 실행하세요.")
     path = Path(bpy.path.abspath(asset.path)).expanduser().resolve()
@@ -98,7 +98,7 @@ def import_asset(context, asset):
         armatures[0].select_set(True)
         layer.objects.active = armatures[0]
         succeeded = True
-        return created
+        return created, collection
     finally:
         if not succeeded:
             if context.mode != "OBJECT" and bpy.ops.object.mode_set.poll():
