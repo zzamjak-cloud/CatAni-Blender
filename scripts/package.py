@@ -71,6 +71,13 @@ def build(blender, output_dir, tag=None):
             if package.testzip() is not None:
                 raise ValueError("ZIP 무결성 검사에 실패했습니다.")
         run_checked(prefix + ["validate", str(archive)], env, "extension_zip")
+        repository_path = work / "acceptance"
+        with zipfile.ZipFile(archive) as package:
+            package.extractall(repository_path / "catani")
+        acceptance_env = dict(os.environ, BLENDER_USER_RESOURCES=str(work / "acceptance-profile"),
+                              CATANI_PACKAGE_ROOT=str(repository_path))
+        run_checked([blender, "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1",
+                     "--python", str(ROOT / "tests/blender_package.py")], acceptance_env, "extension_zip_runtime")
         shutil.copy2(archive, destination)
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
     checksum = destination.with_suffix(destination.suffix + ".sha256")

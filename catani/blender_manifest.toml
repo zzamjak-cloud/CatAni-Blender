@@ -10,5 +10,5 @@ license = ["SPDX:GPL-3.0-or-later"]
 tags = ["Animation", "Rigging"]
 
 [permissions]
-files = "동작 JSON 명세와 로컬 BVH/FBX 모션 샘플 가져오기"
-network = "선택한 경우 기존 Codex 로그인으로 동작 요청 텍스트 전송"
+files = "로컬 BVH/FBX 모션 샘플 검색·가져오기와 인덱스 저장"
+network = "선택한 공개 CMU BVH 모션 파일 다운로드"

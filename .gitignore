@@ -1,5 +1,6 @@
 # 로컬 도구와 개발 프로필
 .serena/
+.omc/
 .blender-dev/
 .blender-package/
 .blender-ci/

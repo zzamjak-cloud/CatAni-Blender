@@ -19,6 +19,10 @@ class MotionAsset:
     file_type: str
     tags: tuple[str, ...]
     description: str = ""
+    source_name: str = ""
+    source_url: str = ""
+    license_note: str = ""
+    license_url: str = ""
 
     def to_dict(self):
         return {
@@ -28,6 +32,10 @@ class MotionAsset:
             "file_type": self.file_type,
             "tags": list(self.tags),
             "description": self.description,
+            "source_name": self.source_name,
+            "source_url": self.source_url,
+            "license_note": self.license_note,
+            "license_url": self.license_url,
         }
 
 
@@ -73,7 +81,7 @@ def read_manifest(directory):
             raise ValueError("motions.json의 file은 폴더 내부 상대 경로여야 합니다.")
         if file_name in result:
             raise ValueError(f"motions.json에 파일이 중복되었습니다: {file_name}")
-        for field in ("name", "description"):
+        for field in ("name", "description", "source_name", "source_url", "license_note", "license_url"):
             if field in item and not isinstance(item[field], str):
                 raise ValueError(f"motions.json의 {field}는 문자열이어야 합니다.")
         tags = item.get("tags", [])
@@ -83,18 +91,18 @@ def read_manifest(directory):
     return result
 
 
-def make_asset(filepath, name="", tags="", description=""):
+def make_asset(filepath, name="", tags="", description="", source_name="", source_url="", license_note="", license_url=""):
     path = Path(filepath).expanduser().resolve()
     if not path.is_file():
         raise ValueError(f"모션 파일을 찾을 수 없습니다: {path}")
     extension = path.suffix.lower()
     if extension not in SUPPORTED_EXTENSIONS:
         raise ValueError("BVH 또는 FBX 모션 파일만 등록할 수 있습니다.")
-    if not isinstance(name, str) or not isinstance(description, str):
+    if not all(isinstance(value, str) for value in (name, description, source_name, source_url, license_note, license_url)):
         raise ValueError("모션 이름과 설명은 문자열이어야 합니다.")
     title = name.strip() or path.stem.replace("_", " ").replace("-", " ")
     identifier = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:20]
-    return MotionAsset(identifier, title, str(path), extension[1:], normalize_tags(tags) or normalize_tags(title), description.strip())
+    return MotionAsset(identifier, title, str(path), extension[1:], normalize_tags(tags) or normalize_tags(title), description.strip(), source_name, source_url, license_note, license_url)
 
 
 def scan_library(directory):
@@ -117,7 +125,7 @@ def scan_library(directory):
             tags = normalize_tags(path.stem.replace("_", " ").replace("-", " "))
         name = str(meta.get("name") or path.stem.replace("_", " ").replace("-", " ")).strip()
         description = str(meta.get("description") or "").strip()
-        assets.append(make_asset(path, name, tags, description))
+        assets.append(make_asset(path, name, tags, description, **{field: meta.get(field, "") for field in ("source_name", "source_url", "license_note", "license_url")}))
     return assets
 
 
@@ -155,6 +163,9 @@ def assets_from_json(text):
             raise ValueError("모션 태그는 문자열 배열이어야 합니다.")
         if not isinstance(item.get("description", ""), str):
             raise ValueError("모션 설명은 문자열이어야 합니다.")
+        for field in ("source_name", "source_url", "license_note", "license_url"):
+            if not isinstance(item.get(field, ""), str):
+                raise ValueError("모션 출처와 이용 조건은 문자열이어야 합니다.")
         if item["id"] in used_ids:
             raise ValueError("모션 인덱스 ID가 중복되었습니다.")
         used_ids.add(item["id"])
@@ -165,5 +176,9 @@ def assets_from_json(text):
             file_type=str(item["file_type"]),
             tags=tuple(str(tag) for tag in item.get("tags", [])),
             description=str(item.get("description", "")),
+            source_name=item.get("source_name", ""),
+            source_url=item.get("source_url", ""),
+            license_note=item.get("license_note", ""),
+            license_url=item.get("license_url", ""),
         ))
     return result

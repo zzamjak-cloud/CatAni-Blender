@@ -1,4 +1,4 @@
-"""외부 API 없이 재현 가능한 동작 명세와 샘플러."""
+"""로컬 보조 절차 동작의 최소 곡선 샘플러."""
 
 from dataclasses import asdict, dataclass
 import json
@@ -14,19 +14,10 @@ class MotionSpec:
     repeat: int = 2
     fps: float = 24.0
     start_frame: int = 1
-    plan: dict | None = None
 
     def __post_init__(self):
-        if self.recipe == "natural_wave":
-            from .agent_plan import DEFAULT_PLAN, validate_plan
-            plan = validate_plan(DEFAULT_PLAN if self.plan is None else self.plan)
-            if not plan["supported"]:
-                raise ValueError(plan["reason"] or "지원하지 않는 동작 요청입니다.")
-            object.__setattr__(self, "plan", dict(plan))
-            for name in ("side", "duration", "repeat"):
-                object.__setattr__(self, name, plan[name])
-        if self.recipe not in {"idle", "wave", "natural_wave"}:
-            raise ValueError("지원 동작은 idle, wave, natural_wave입니다.")
+        if self.recipe not in {"idle", "wave"}:
+            raise ValueError("지원 보조 동작은 idle, wave입니다.")
         if self.side not in {"L", "R"}:
             raise ValueError("손 방향은 L 또는 R이어야 합니다.")
         for name in ("duration", "intensity", "fps"):
@@ -51,7 +42,7 @@ class MotionSpec:
         return self.start_frame + self.frame_count
 
     def to_json(self):
-        return json.dumps({"schema_version": 1, "engine_version": "0.3.0", "rig_profile": "player_v1", "curve_encoding": "sparse_ik_bezier" if self.recipe == "natural_wave" else "sparse_axis_angle_bezier", **asdict(self)}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps({"schema_version": 1, "engine_version": "0.3.0", "rig_profile": "player_v1", "curve_encoding": "sparse_axis_angle_bezier", **asdict(self)}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
 def sample_motion(spec, progress):
@@ -73,9 +64,6 @@ def sample_motion(spec, progress):
 
 def sparse_channels(spec):
     """본별 고정 축과 (위상, 각도, 좌미분, 우미분) 최소 곡선 키를 만든다."""
-    if spec.recipe == "natural_wave":
-        from .natural import natural_channels
-        return natural_channels(spec.plan)
     frequency = math.tau * spec.repeat
     quarter_phases = [i / (4 * spec.repeat) for i in range(4 * spec.repeat + 1)]
     channels = {}

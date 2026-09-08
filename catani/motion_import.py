@@ -82,6 +82,8 @@ def import_asset(context, asset):
                     linked.objects.unlink(obj)
             obj["catani_motion_source"] = str(path)
             obj["catani_motion_tags"] = ", ".join(asset.tags)
+            for field in ("source_name", "source_url", "license_note", "license_url"):
+                obj[f"catani_motion_{field}"] = getattr(asset, field, "")
         collection["catani_motion_id"] = asset.identifier
         collection["catani_motion_source"] = str(path)
         # 가져오기 도중 만들어진 빈 임시 컬렉션만 제거한다.

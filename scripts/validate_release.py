@@ -13,7 +13,8 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_FILES = (
-    "__init__.py", "core.py", "engine.py", "natural.py", "agent_plan.py", "agent_bridge.py", "motion_library.py", "motion_import.py",
+    "__init__.py", "core.py", "engine.py", "motion_library.py", "motion_import.py",
+    "source_catalog.py", "motion_downloader.py",
     "blender_manifest.toml",
 )
 
@@ -33,14 +34,10 @@ def validate(root=ROOT, tag=None):
         if not (root / "catani" / name).is_file():
             raise ValueError(f"필수 런타임 파일이 없습니다: {name}")
     for name in ("LICENSE", "README.md", "Blender/Player_Animation_01.blend",
-                 "scripts/dev_bootstrap.py", "tests/fixtures/natural_wave_plan.json",
+                 "scripts/dev_bootstrap.py",
                  "motions/motions.json", "motions/demo/friendly_wave.bvh"):
         if not (root / name).is_file():
             raise ValueError(f"배포 검사 입력이 없습니다: {name}")
-    plans = runpy.run_path(str(root / "catani/agent_plan.py"))
-    fixture = plans["parse_plan"]((root / "tests/fixtures/natural_wave_plan.json").read_text(encoding="utf-8"))
-    if fixture["reason"] == plans["DEFAULT_PLAN"]["reason"]:
-        raise ValueError("CI fixture에는 실제 에이전트 결과와 구별되는 설명을 넣으세요.")
     powershell = (root / "scripts/dev_run.ps1").read_bytes()
     if not powershell.startswith(b"\xef\xbb\xbf"):
         raise ValueError("Windows PowerShell 실행기에는 UTF-8 BOM이 필요합니다.")

@@ -1,20 +1,17 @@
-"""CatAni: 비용 없이 실행하는 캐주얼 동작 생성기."""
+"""CatAni: 실제 모션 데이터를 내려받고 검색하는 로컬 라이브러리."""
 
-import bpy
-import json
 import textwrap
+import bpy
 from bpy.props import EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
-from bpy_extras.io_utils import ImportHelper, ExportHelper
-
 from .core import MotionSpec
 from . import engine
 from .motion_library import assets_from_json, assets_to_json, default_library_path, scan_library, search_assets
 from .motion_import import import_asset
-from .agent_plan import DEFAULT_PLAN, parse_plan
-from .agent_bridge import AgentJob
+from .source_catalog import CATALOG, get_source
+from .motion_downloader import DownloadJob
 
-_agent_job = None
-_agent_scene = None
+_download_job = None
+_download_scene = None
 
 
 def _redraw():
@@ -24,152 +21,125 @@ def _redraw():
                 area.tag_redraw()
 
 
-def _poll_agent():
-    global _agent_job, _agent_scene
-    if _agent_job is None:
+def _refresh_library(settings):
+    assets = search_assets(scan_library(bpy.path.abspath(settings.motion_library_path)), settings.motion_query)
+    settings.motion_index_json = assets_to_json(assets)
+    if not any(asset.identifier == settings.motion_selected_id for asset in assets):
+        settings.motion_selected_id = assets[0].identifier if assets else ""
+    settings.motion_status = f"검색 결과 {len(assets)}개" if assets else "공개 모션을 받거나 BVH/FBX 폴더를 선택하세요."
+    return assets
+
+
+def _poll_download():
+    global _download_job, _download_scene
+    if _download_job is None:
         return None
     try:
-        plan = _agent_job.poll()
-        if plan is None:
-            return 0.3
-        _agent_scene.catani_settings.plan_json = json.dumps(plan, ensure_ascii=False)
-        _agent_scene.catani_settings.agent_status = "명세 수신 완료 · 검토 후 미리보기를 누르세요." if plan["supported"] else "지원 범위 밖 요청 · 명세 설명을 확인하세요."
+        settings = _download_scene.catani_settings
+        settings.download_status = _download_job.status
+        settings.download_progress = _download_job.progress
+        if _download_job.done:
+            if not _download_job.error:
+                settings.motion_query = ""
+                assets = _refresh_library(settings)
+                selected = next((a for a in assets if a.path == str(_download_job.result)), None)
+                if selected:
+                    settings.motion_selected_id = selected.identifier
+                settings.download_status = "다운로드·인덱싱 완료 · 선택 모션을 가져오세요."
+            _download_job = None
+            _download_scene = None
     except Exception as error:
-        _agent_job.close()
-        if _agent_scene is not None:
-            _agent_scene.catani_settings.agent_status = str(error)[:250]
-    finally:
-        if _agent_job is not None and _agent_job._closed:
-            _agent_job = None
-            _agent_scene = None
+        if _download_job:
+            _download_job.cancel()
+        try:
+            _download_scene.catani_settings.download_status = str(error)[:250]
+        except (AttributeError, ReferenceError):
+            pass
+        _download_job = None
+        _download_scene = None
     _redraw()
-    return 0.3 if _agent_job is not None else None
+    return 0.2 if _download_job else None
 
 
 @bpy.app.handlers.persistent
-def _stop_agent(_unused=None):
-    global _agent_job, _agent_scene
-    if _agent_job is not None:
-        _agent_job.close()
-        if _agent_scene is not None:
-            _agent_scene.catani_settings.agent_status = "에이전트 요청을 취소했습니다."
-    _agent_job = None
-    _agent_scene = None
-    if bpy.app.timers.is_registered(_poll_agent):
-        bpy.app.timers.unregister(_poll_agent)
+def _stop_download(_unused=None):
+    global _download_job, _download_scene
+    if _download_job:
+        _download_job.cancel()
+    _download_job = None
+    _download_scene = None
+    if bpy.app.timers.is_registered(_poll_download):
+        bpy.app.timers.unregister(_poll_download)
 
 
 class CatAniSettings(bpy.types.PropertyGroup):
-    recipe: EnumProperty(name="동작", items=[("natural_wave", "전신 인사 · 팔 IK", "얼굴 앞 손 경로와 발 접촉을 IK로 제어하는 전신 인사"), ("idle", "대기 / 호흡", "제자리 호흡 동작"), ("wave", "단순 손 흔들기 · 기존 FK", "비교용 기존 FK 동작이며 전신 인사에는 팔 IK 항목을 사용하세요")], default="natural_wave")
-    side: EnumProperty(name="손", items=[("R", "오른손", "캐릭터 오른손"), ("L", "왼손", "캐릭터 왼손")], default="R")
-    duration: FloatProperty(name="전체 길이(초)", default=2.0, min=0.5, max=10.0)
-    intensity: FloatProperty(name="동작 강도", default=0.7, min=0.1, max=1.0)
-    repeat: IntProperty(name="구간 내 반복", default=2, min=1, max=8)
-    prompt: StringProperty(name="동작 요청", default="친근하게 오른손으로 두 번 인사해줘. 시선과 몸통, 체중 이동을 자연스럽게 연결해줘.", maxlen=2000)
-    codex_path: StringProperty(name="Codex 실행 파일", subtype="FILE_PATH")
-    plan_json: StringProperty(name="검토할 동작 명세", default=json.dumps(DEFAULT_PLAN, ensure_ascii=False))
-    agent_status: StringProperty(name="상태", default="기본 전신 인사 프리셋 · 에이전트 호출 없이 미리보기 가능")
     motion_library_path: StringProperty(name="모션 폴더", subtype="DIR_PATH", default=str(default_library_path()))
     motion_query: StringProperty(name="검색", default="")
     motion_index_json: StringProperty(name="모션 인덱스", default="[]", options={"HIDDEN"})
     motion_selected_id: StringProperty(name="선택 모션", default="", options={"HIDDEN"})
-    motion_status: StringProperty(name="모션 상태", default="motions 폴더에 BVH/FBX를 넣고 목록을 갱신하세요.")
+    motion_status: StringProperty(name="모션 상태", default="공개 모션을 받거나 BVH/FBX 폴더를 선택하세요.")
+    download_status: StringProperty(name="다운로드 상태", default="공개 모션 파일 직접 다운로드 · API 키 불필요")
+    download_progress: FloatProperty(name="다운로드 진행", min=0.0, max=1.0, subtype="FACTOR")
+    recipe: EnumProperty(name="보조 동작", items=[("idle", "대기 / 호흡", "Player 샘플의 절차 동작"), ("wave", "단순 손 흔들기", "비교용 FK 동작")], default="idle")
+    side: EnumProperty(name="손", items=[("R", "오른손", "캐릭터 오른손"), ("L", "왼손", "캐릭터 왼손")], default="R")
+    duration: FloatProperty(name="전체 길이(초)", default=2.0, min=0.5, max=10.0)
+    intensity: FloatProperty(name="동작 강도", default=0.7, min=0.1, max=1.0)
+    repeat: IntProperty(name="구간 내 반복", default=2, min=1, max=8)
 
 
-class CATANI_OT_agent_generate(bpy.types.Operator):
-    bl_idname = "catani.agent_generate"
-    bl_label = "에이전트로 전신 인사 설계"
-    bl_description = "기존 Codex 로그인과 계정 사용량을 사용합니다. 요청 텍스트만 전송하며 장면 파일은 전송하지 않습니다"
+class CATANI_OT_motion_download(bpy.types.Operator):
+    bl_idname = "catani.motion_download"
+    bl_label = "공개 모션 받기"
+    bl_description = "출처와 이용 조건이 표시된 실제 CMU BVH를 내려받습니다"
+    source_id: StringProperty(options={"HIDDEN"}, default=CATALOG[0].id)
 
     @classmethod
     def poll(cls, context):
-        return _agent_job is None and engine.get_session() is None
+        return _download_job is None
 
     def execute(self, context):
-        global _agent_job, _agent_scene
+        global _download_job, _download_scene
         settings = context.scene.catani_settings
         try:
-            _agent_job = AgentJob(settings.prompt, bpy.path.abspath(settings.codex_path) if settings.codex_path else "", previous_plan=parse_plan(settings.plan_json))
-            _agent_scene = context.scene
-            settings.agent_status = "에이전트 설계 중 · 장면은 변경하지 않습니다."
-            bpy.app.timers.register(_poll_agent, first_interval=0.3)
+            source = get_source(self.source_id)
+            if not settings.motion_library_path.strip():
+                raise ValueError("다운로드할 모션 폴더를 선택하세요.")
+            _download_scene = context.scene
+            settings.download_progress = 0.0
+            settings.download_status = f"{source.name} 다운로드 준비 중"
+            _download_job = DownloadJob(source, bpy.path.abspath(settings.motion_library_path))
+            bpy.app.timers.register(_poll_download, first_interval=0.2)
         except Exception as error:
-            _stop_agent()
+            _stop_download()
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
         return {"FINISHED"}
 
 
-class CATANI_OT_agent_cancel(bpy.types.Operator):
-    bl_idname = "catani.agent_cancel"
-    bl_label = "에이전트 요청 취소"
+class CATANI_OT_motion_download_cancel(bpy.types.Operator):
+    bl_idname = "catani.motion_download_cancel"
+    bl_label = "다운로드 취소"
+
+    @classmethod
+    def poll(cls, context):
+        return _download_job is not None
 
     def execute(self, context):
-        _stop_agent()
-        return {"FINISHED"}
-
-
-class CATANI_OT_plan_default(bpy.types.Operator):
-    bl_idname = "catani.plan_default"
-    bl_label = "기본 전신 인사 명세"
-
-    def execute(self, context):
-        context.scene.catani_settings.plan_json = json.dumps(DEFAULT_PLAN, ensure_ascii=False)
-        context.scene.catani_settings.agent_status = "기본 프리셋으로 복원했습니다."
-        return {"FINISHED"}
-
-
-class CATANI_OT_plan_import(bpy.types.Operator, ImportHelper):
-    bl_idname = "catani.plan_import"
-    bl_label = "명세 JSON 가져오기"
-    filename_ext = ".json"
-    filter_glob: StringProperty(default="*.json", options={"HIDDEN"})
-
-    def execute(self, context):
-        try:
-            with open(self.filepath, "rb") as stream:
-                data = stream.read(16385)
-            plan = parse_plan(data.decode("utf-8"))
-            context.scene.catani_settings.plan_json = json.dumps(plan, ensure_ascii=False)
-            context.scene.catani_settings.agent_status = "JSON 명세 검증 완료 · 검토 후 미리보기를 누르세요."
-        except Exception as error:
-            self.report({"ERROR"}, str(error))
-            return {"CANCELLED"}
-        return {"FINISHED"}
-
-
-class CATANI_OT_plan_export(bpy.types.Operator, ExportHelper):
-    bl_idname = "catani.plan_export"
-    bl_label = "명세 JSON 내보내기"
-    filename_ext = ".json"
-    filter_glob: StringProperty(default="*.json", options={"HIDDEN"})
-
-    def execute(self, context):
-        try:
-            plan = parse_plan(context.scene.catani_settings.plan_json)
-            with open(self.filepath, "w", encoding="utf-8") as stream:
-                json.dump(plan, stream, ensure_ascii=False, indent=2)
-        except Exception as error:
-            self.report({"ERROR"}, str(error))
-            return {"CANCELLED"}
+        _download_job.cancel()
+        context.scene.catani_settings.download_status = "다운로드 취소 중"
         return {"FINISHED"}
 
 
 class CATANI_OT_motion_refresh(bpy.types.Operator):
     bl_idname = "catani.motion_refresh"
     bl_label = "모션 목록 갱신"
-    bl_description = "로컬 BVH/FBX 폴더를 다시 읽고 검색 결과를 갱신합니다"
 
     def execute(self, context):
-        settings = context.scene.catani_settings
         try:
-            assets = search_assets(scan_library(bpy.path.abspath(settings.motion_library_path)), settings.motion_query)
-            settings.motion_index_json = assets_to_json(assets)
-            settings.motion_selected_id = assets[0].identifier if assets else ""
-            settings.motion_status = f"검색 결과 {len(assets)}개" if assets else "검색된 BVH/FBX 모션이 없습니다."
+            _refresh_library(context.scene.catani_settings)
         except Exception as error:
             self.report({"ERROR"}, str(error))
-            settings.motion_status = str(error)[:250]
+            context.scene.catani_settings.motion_status = str(error)[:250]
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -177,25 +147,24 @@ class CATANI_OT_motion_refresh(bpy.types.Operator):
 class CATANI_OT_motion_pick(bpy.types.Operator):
     bl_idname = "catani.motion_pick"
     bl_label = "모션 선택"
-    bl_description = "가져올 모션 샘플을 선택합니다"
-
     asset_id: StringProperty(options={"HIDDEN"})
 
     def execute(self, context):
         settings = context.scene.catani_settings
-        assets = assets_from_json(settings.motion_index_json)
-        if not any(asset.identifier == self.asset_id for asset in assets):
-            self.report({"ERROR"}, "선택한 모션이 현재 검색 결과에 없습니다.")
+        try:
+            if not any(a.identifier == self.asset_id for a in assets_from_json(settings.motion_index_json)):
+                raise ValueError("선택한 모션이 현재 검색 결과에 없습니다.")
+        except ValueError as error:
+            self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
         settings.motion_selected_id = self.asset_id
-        settings.motion_status = "모션을 선택했습니다. 가져오기 후 리타게팅 기준으로 사용하세요."
         return {"FINISHED"}
 
 
 class CATANI_OT_motion_import(bpy.types.Operator):
     bl_idname = "catani.motion_import"
     bl_label = "선택 모션 가져오기"
-    bl_description = "선택한 BVH/FBX 모션을 별도 컬렉션으로 가져옵니다. 현재 리그에는 아직 자동 적용하지 않습니다"
+    bl_description = "모션 원본 리그를 별도 컬렉션에 가져옵니다. 캐릭터 자동 리타게팅은 포함하지 않습니다"
 
     @classmethod
     def poll(cls, context):
@@ -205,11 +174,11 @@ class CATANI_OT_motion_import(bpy.types.Operator):
         settings = context.scene.catani_settings
         try:
             assets = assets_from_json(settings.motion_index_json)
-            asset = next((item for item in assets if item.identifier == settings.motion_selected_id), assets[0] if assets else None)
+            asset = next((a for a in assets if a.identifier == settings.motion_selected_id), None)
             if asset is None:
-                raise ValueError("가져올 모션이 없습니다. 먼저 목록을 갱신하세요.")
+                raise ValueError("가져올 모션을 먼저 선택하세요.")
             import_asset(context, asset)
-            settings.motion_status = f"{asset.name} 가져오기 완료 · 리타게팅 기준 모션으로 사용하세요."
+            settings.motion_status = f"{asset.name} 가져오기 완료 · 원본 리그의 Action을 재생하세요."
         except Exception as error:
             self.report({"ERROR"}, str(error))
             settings.motion_status = str(error)[:250]
@@ -220,42 +189,35 @@ class CATANI_OT_motion_import(bpy.types.Operator):
 class CATANI_OT_inspect(bpy.types.Operator):
     bl_idname = "catani.inspect_rig"
     bl_label = "선택 리그 검사"
-    bl_description = "Player v1 샘플 리그의 본 구조와 레스트 방향을 검사합니다"
 
     def execute(self, context):
         errors = engine.inspect_rig(context.active_object)
-        if errors:
-            self.report({"ERROR"}, " / ".join(errors))
-            return {"CANCELLED"}
-        self.report({"INFO"}, "Player v1 프로필을 사용할 수 있습니다.")
-        return {"FINISHED"}
+        self.report({"ERROR"} if errors else {"INFO"}, " / ".join(errors) if errors else "Player v1 보조 동작을 사용할 수 있습니다.")
+        return {"CANCELLED"} if errors else {"FINISHED"}
 
 
 class CATANI_OT_preview(bpy.types.Operator):
     bl_idname = "catani.preview"
-    bl_label = "동작 미리보기 생성"
-    bl_description = "리그·바인딩 메시 복사본에 동작을 생성합니다. 제약으로 연결된 소품은 제외합니다"
+    bl_label = "보조 동작 미리보기"
 
     @classmethod
     def poll(cls, context):
-        return _agent_job is None and engine.get_session() is None and context.mode == "OBJECT" and context.active_object is not None and context.active_object.type == "ARMATURE"
+        return engine.get_session() is None and context.mode == "OBJECT" and context.active_object is not None and context.active_object.type == "ARMATURE"
 
     def execute(self, context):
         settings = context.scene.catani_settings
         try:
-            spec = MotionSpec(recipe=settings.recipe, side=settings.side, duration=settings.duration, intensity=settings.intensity, repeat=settings.repeat, fps=context.scene.render.fps / context.scene.render.fps_base, plan=parse_plan(settings.plan_json) if settings.recipe == "natural_wave" else None)
+            spec = MotionSpec(recipe=settings.recipe, side=settings.side, duration=settings.duration, intensity=settings.intensity, repeat=settings.repeat, fps=context.scene.render.fps / context.scene.render.fps_base)
             engine.begin_preview(context, context.active_object, spec)
         except Exception as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
-        self.report({"INFO"}, "미리보기 생성 완료. 타임라인을 재생하고 확정 또는 취소하세요.")
         return {"FINISHED"}
 
 
 class CATANI_OT_confirm(bpy.types.Operator):
     bl_idname = "catani.confirm"
     bl_label = "복사본으로 확정"
-    bl_description = "생성 결과와 독립 Action을 보관합니다. 원본은 Outliner에서 다시 표시할 수 있습니다"
 
     @classmethod
     def poll(cls, context):
@@ -270,7 +232,6 @@ class CATANI_OT_confirm(bpy.types.Operator):
 class CATANI_OT_cancel(bpy.types.Operator):
     bl_idname = "catani.cancel"
     bl_label = "미리보기 취소"
-    bl_description = "생성 복사본을 삭제하고 원본 표시·선택·프레임 범위를 복원합니다"
 
     @classmethod
     def poll(cls, context):
@@ -278,12 +239,16 @@ class CATANI_OT_cancel(bpy.types.Operator):
 
     def execute(self, context):
         engine.cancel_preview(context)
-        self.report({"INFO"}, "미리보기를 취소하고 원본 상태를 복원했습니다.")
         return {"FINISHED"}
 
 
+def _label_lines(layout, text):
+    for line in textwrap.wrap(text, 32):
+        layout.label(text=line)
+
+
 class CATANI_PT_main(bpy.types.Panel):
-    bl_label = "CatAni · 로컬 동작"
+    bl_label = "CatAni · 모션 라이브러리"
     bl_idname = "CATANI_PT_main"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -292,91 +257,85 @@ class CATANI_PT_main(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.catani_settings
-        layout.label(text="Player v1 샘플 리그 전용", icon="ARMATURE_DATA")
-        layout.label(text="제약으로 연결된 소품은 생성에서 제외")
-        layout.label(text="최소 키 · Graph Editor 곡선 편집")
-        layout.operator("catani.inspect_rig")
-        if engine.get_session():
-            layout.label(text="복사본 미리보기 · 타임라인 재생")
-            layout.operator("catani.confirm", icon="CHECKMARK")
-            layout.operator("catani.cancel", icon="X")
-            layout.label(text="확정하면 원본은 숨김으로 유지")
-            layout.label(text="저장·Undo 전에 미리보기 자동 취소")
-        else:
-            layout.prop(settings, "recipe")
-            if settings.recipe == "natural_wave":
-                box = layout.box()
-                box.label(text="한 손 전신 인사 전용 · 양발 접촉 유지")
-                box.label(text="팔 IK · 손목 위치와 팔꿈치 방향 제어")
-                box.label(text="손 경로 편집: IK_Arm.L / IK_Arm.R")
-                box.label(text="팔꿈치 편집: IK_Pole_Arm.L / R")
-                box.label(text="기존 Codex 계정 사용량 사용 · 요청만 전송")
-                box.prop(settings, "prompt")
-                box.prop(settings, "codex_path")
-                box.operator("catani.agent_generate")
-                if _agent_job is not None:
-                    box.operator("catani.agent_cancel", icon="X")
-                for line in textwrap.wrap(settings.agent_status, 30):
-                    box.label(text=line)
-                tools = box.column()
-                tools.enabled = _agent_job is None
-                tools.operator("catani.plan_default")
-                row = tools.row(align=True)
-                row.operator("catani.plan_import", text="JSON 가져오기")
-                row.operator("catani.plan_export", text="JSON 내보내기")
-                review = layout.box()
-                review.label(text="적용 전 동작 명세 검토")
-                try:
-                    plan = parse_plan(settings.plan_json)
-                    style_label = {"friendly": "친근함", "shy": "수줍음", "energetic": "활기참"}[plan["style"]]
-                    review.label(text=f"{'오른손' if plan['side'] == 'R' else '왼손'} · {plan['duration']:.1f}초 · {plan['repeat']}회 · {style_label}")
-                    for line in textwrap.wrap(plan["reason"], 30):
-                        review.label(text=line)
-                    review.label(text=f"체중 이동 {plan['weight_shift'] * 100:.1f}% · 몸통 {plan['torso_turn']:.1f}°")
-                    review.label(text=f"시선 {plan['head_turn']:.1f}° · 팔 {plan['arm_lift']:.1f}°")
-                    if not plan["supported"]:
-                        review.label(text="지원하지 않는 요청: 미리보기 불가", icon="ERROR")
-                except ValueError:
-                    review.label(text="잘못된 명세 · JSON을 다시 가져오세요", icon="ERROR")
-                review.label(text="세부 수치는 JSON 내보내기 후 편집 가능")
-            else:
-                if settings.recipe == "wave":
-                    layout.prop(settings, "side", expand=True)
-                layout.prop(settings, "duration")
-                layout.prop(settings, "intensity")
-                layout.prop(settings, "repeat")
-            layout.operator("catani.preview", icon="PLAY")
-            layout.label(text="오브젝트 모드에서 리그를 선택하세요")
+        path_row = layout.row()
+        path_row.enabled = _download_job is None
+        path_row.prop(settings, "motion_library_path")
+        source_box = layout.box()
+        source_box.label(text="공개 모션 받기 · CMU BVH", icon="IMPORT")
+        source_box.label(text="실제 캡처 데이터 · API 키 불필요")
+        for source in CATALOG:
+            row = source_box.row(align=True)
+            row.label(text=source.name)
+            row.operator("catani.motion_download", text=f"받기 · {source.size_bytes / 1024:.0f} KB").source_id = source.id
+        _label_lines(source_box, CATALOG[0].source_name)
+        _label_lines(source_box, CATALOG[0].license_note)
+        source_box.operator("wm.url_open", text="CMU 출처·이용 조건 원문", icon="URL").url = CATALOG[0].license_url
+        _label_lines(source_box, settings.download_status)
+        if _download_job is not None:
+            source_box.progress(factor=settings.download_progress, text="다운로드")
+            source_box.operator("catani.motion_download_cancel", icon="X")
         library = layout.box()
-        library.label(text="모션 라이브러리 · BVH/FBX 샘플 기반", icon="FILE_FOLDER")
-        library.prop(settings, "motion_library_path")
+        library.label(text="내 모션 · BVH / FBX", icon="FILE_FOLDER")
         library.prop(settings, "motion_query")
         library.operator("catani.motion_refresh", icon="FILE_REFRESH")
         try:
             assets = assets_from_json(settings.motion_index_json)
-        except Exception:
+        except ValueError:
             assets = []
-        for asset in assets[:6]:
+        selected = next((a for a in assets if a.identifier == settings.motion_selected_id), None)
+        for asset in assets[:10]:
             row = library.row(align=True)
             icon = "RADIOBUT_ON" if asset.identifier == settings.motion_selected_id else "RADIOBUT_OFF"
-            operator = row.operator("catani.motion_pick", text=asset.name[:32], icon=icon)
-            operator.asset_id = asset.identifier
-            row.label(text=", ".join(asset.tags[:3]))
-        if len(assets) > 6:
-            library.label(text=f"외 {len(assets) - 6}개 · 검색어를 좁히세요")
+            row.operator("catani.motion_pick", text=asset.name[:32], icon=icon).asset_id = asset.identifier
+        if len(assets) > 10:
+            library.label(text=f"외 {len(assets) - 10}개 · 검색어를 좁히세요")
+        if selected:
+            _label_lines(library, selected.description)
+            _label_lines(library, selected.source_name or "사용자가 등록한 로컬 파일")
+            _label_lines(library, selected.license_note or "이용 조건 정보 없음 · 제공처에서 확인하세요")
+            if selected.source_url:
+                library.operator("wm.url_open", text="선택 모션 출처", icon="URL").url = selected.source_url
         library.operator("catani.motion_import", icon="IMPORT")
-        for line in textwrap.wrap(settings.motion_status, 32):
-            library.label(text=line)
+        _label_lines(library, settings.motion_status)
+        layout.label(text="가져오기: 모션 원본 리그와 Action")
+        layout.label(text="캐릭터 자동 리타게팅은 다음 단계")
 
 
-_classes = (CatAniSettings, CATANI_OT_agent_generate, CATANI_OT_agent_cancel, CATANI_OT_plan_default, CATANI_OT_plan_import, CATANI_OT_plan_export, CATANI_OT_motion_refresh, CATANI_OT_motion_pick, CATANI_OT_motion_import, CATANI_OT_inspect, CATANI_OT_preview, CATANI_OT_confirm, CATANI_OT_cancel, CATANI_PT_main)
+class CATANI_PT_procedural(bpy.types.Panel):
+    bl_label = "보조 · 절차 동작 비교"
+    bl_idname = "CATANI_PT_procedural"
+    bl_parent_id = "CATANI_PT_main"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CatAni"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.catani_settings
+        layout.label(text="Player v1 샘플 리그 전용")
+        if engine.get_session():
+            layout.operator("catani.confirm", icon="CHECKMARK")
+            layout.operator("catani.cancel", icon="X")
+            layout.label(text="확정하면 원본은 숨김으로 유지")
+            return
+        layout.operator("catani.inspect_rig")
+        layout.prop(settings, "recipe")
+        if settings.recipe == "wave":
+            layout.prop(settings, "side", expand=True)
+        for name in ("duration", "intensity", "repeat"):
+            layout.prop(settings, name)
+        layout.operator("catani.preview", icon="PLAY")
+
+
+_classes = (CatAniSettings, CATANI_OT_motion_download, CATANI_OT_motion_download_cancel, CATANI_OT_motion_refresh, CATANI_OT_motion_pick, CATANI_OT_motion_import, CATANI_OT_inspect, CATANI_OT_preview, CATANI_OT_confirm, CATANI_OT_cancel, CATANI_PT_main, CATANI_PT_procedural)
 
 
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.catani_settings = PointerProperty(type=CatAniSettings)
-    bpy.app.handlers.load_pre.append(_stop_agent)
+    bpy.app.handlers.load_pre.append(_stop_download)
     bpy.app.handlers.load_pre.append(engine.clear_before_load)
     bpy.app.handlers.save_pre.append(engine.cancel_before_save)
     bpy.app.handlers.undo_pre.append(engine.cancel_before_save)
@@ -384,9 +343,9 @@ def register():
 
 
 def unregister():
-    _stop_agent()
-    if _stop_agent in bpy.app.handlers.load_pre:
-        bpy.app.handlers.load_pre.remove(_stop_agent)
+    _stop_download()
+    if _stop_download in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_stop_download)
     engine.cancel_preview(bpy.context)
     for handlers, callback in ((bpy.app.handlers.load_pre, engine.clear_before_load), (bpy.app.handlers.save_pre, engine.cancel_before_save), (bpy.app.handlers.undo_pre, engine.cancel_before_save), (bpy.app.handlers.redo_pre, engine.cancel_before_save)):
         if callback in handlers:
