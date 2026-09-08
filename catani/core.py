@@ -42,7 +42,7 @@ class MotionSpec:
         return self.start_frame + self.frame_count
 
     def to_json(self):
-        return json.dumps({"schema_version": 1, "engine_version": "0.5.0", "rig_profile": "player_v1", "curve_encoding": "sparse_axis_angle_bezier", **asdict(self)}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps({"schema_version": 1, "engine_version": "0.5.1", "rig_profile": "player_v1", "curve_encoding": "sparse_axis_angle_bezier", **asdict(self)}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
 def sample_motion(spec, progress):

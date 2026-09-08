@@ -23,11 +23,18 @@ for name in ("agent_bridge.py", "agent_plan.py", "natural.py"):
 for suffix in ("agent_generate", "agent_cancel", "plan_default", "plan_import", "plan_export"):
     assert bpy.types.Operator.bl_rna_get_subclass_py(f"CATANI_OT_{suffix}") is None
 settings = bpy.context.scene.catani_settings
-settings.motion_library_path = str(repository_path / "catani" / "motions")
-settings.motion_query = ""
+# 폴더를 직접 지정하지 않는다. 설치본이 동봉 예제를 스스로 찾아야 한다.
+bundled = addon.bundled_library_path()
+assert bundled == repository_path / "catani" / "motions", f"동봉 모션 경로가 틀렸습니다: {bundled}"
+assert (bundled / "demo" / "friendly_wave.bvh").is_file(), "동봉 예제 BVH가 없습니다"
+settings.motion_query = "데모"
 assert bpy.ops.catani.motion_refresh() == {"FINISHED"}
 local = [item for item in settings.motions if item.available]
-assert local, "ZIP의 합성 예제 모션을 찾지 못했습니다"
+assert local, "설치본이 동봉 예제 모션을 찾지 못했습니다"
+assert len(local) == 1 and local[0].path == str(bundled / "demo" / "friendly_wave.bvh"), [item.path for item in local]
+settings.motion_query = ""
+assert bpy.ops.catani.motion_refresh() == {"FINISHED"}
+assert len(settings.motions) == len(addon.source_catalog.CATALOG) + 1, len(settings.motions)
 settings.motion_active = next(index for index, item in enumerate(settings.motions) if item.available)
 before = set(bpy.data.objects)
 assert bpy.ops.catani.motion_import() == {"FINISHED"}, settings.motion_status

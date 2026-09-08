@@ -41,8 +41,16 @@ def addon_root():
 
 
 def bundled_library_path():
-    """애드온에 동봉한 읽기 전용 예제 모션 폴더."""
-    return addon_root() / DEFAULT_MOTION_DIR
+    """애드온에 동봉한 읽기 전용 예제 모션 폴더.
+
+    설치본은 ZIP 루트의 motions/가 패키지 디렉터리 안으로 풀리고, 개발 소스는
+    저장소 루트에 있다. 두 배치를 모두 찾는다.
+    """
+    package = Path(__file__).resolve().parent
+    for candidate in (package / DEFAULT_MOTION_DIR, package.parent / DEFAULT_MOTION_DIR):
+        if candidate.is_dir():
+            return candidate
+    return package / DEFAULT_MOTION_DIR
 
 
 def default_library_path():

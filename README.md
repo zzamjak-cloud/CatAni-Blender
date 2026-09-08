@@ -1,6 +1,6 @@
 # CatAni
 
-CatAni 0.5.0은 공개 모션 캡처 데이터를 Blender 안에서 **검색하고, 목록에서 골라, 캐릭터에 바로 적용**하는 Extension입니다. 검색어 한 칸, 목록 하나, 적용 버튼 하나가 전체 흐름입니다. 폴더 경로·출처·이용 조건·체크섬·굽기 옵션 같은 정보는 모두 별도 팝업으로 옮겼습니다.
+CatAni 0.5.1은 공개 모션 캡처 데이터를 Blender 안에서 **검색하고, 목록에서 골라, 캐릭터에 바로 적용**하는 Extension입니다. 검색어 한 칸, 목록 하나, 적용 버튼 하나가 전체 흐름입니다. 폴더 경로·출처·이용 조건·체크섬·굽기 옵션 같은 정보는 모두 별도 팝업으로 옮겼습니다.
 
 기본 카탈로그에는 CMU Graphics Lab Motion Capture Database 기반 BVH **485종**이 걷기·달리기·점프·춤·발차기·오르기 등 **35개 동작 분류**로 정리되어 있습니다. API 키나 유료 외부 모델은 필요하지 않습니다.
 
@@ -162,17 +162,17 @@ macOS Blender 5.2.0에서 통합 목록·즉시 검색, 다운로드 후 자동 
 
 ## 패키징과 릴리즈 준비
 
-배포 후보 버전은 **0.5.0**입니다. 이전 버전은 로컬 개발 이력이며 공개 릴리스가 아닙니다. Python 3.11 이상과 Blender 5.2.0 이상을 준비하고 저장소 루트에서 실행합니다.
+배포 후보 버전은 **0.5.1**입니다. 이전 버전은 로컬 개발 이력이며 공개 릴리스가 아닙니다. Python 3.11 이상과 Blender 5.2.0 이상을 준비하고 저장소 루트에서 실행합니다.
 
 ```bash
-python3 scripts/validate_release.py --tag v0.5.0
+python3 scripts/validate_release.py --tag v0.5.1
 python3 scripts/run_tests.py
-python3 scripts/package.py --tag v0.5.0
+python3 scripts/package.py --tag v0.5.1
 ```
 
 Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는 `BLENDER_BINARY` 또는 각 실행 명령의 `--blender`로 지정합니다. 전체 검사기는 임시 복사본과 독립 프로필에서 실행하므로 기존 개발 결과를 덮어쓰지 않습니다. 실제 CMU 다운로드는 기본 검사에 포함하지 않습니다.
 
-`dist/catani-v0.5.0.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스와 기본 데모 BVH만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 다운로드된 CMU 모션 파일은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
+`dist/catani-v0.5.1.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스와 기본 데모 BVH만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 다운로드된 CMU 모션 파일은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
 
 현재 macOS Blender 5.2.0에서 격리 회귀 검사 10개, 배포 무결성 검사 4개, ZIP 독립 런타임 검증을 통과했습니다. BVH는 합성 테스트 파일로 실제 Blender 가져오기를 확인했고, FBX는 인덱스·검색 경로만 검사했습니다. Windows/Linux 원격 CI와 실제 Pages 원격 설치는 아직 실행하지 않았습니다.
 
@@ -186,7 +186,7 @@ Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는
 | `.github/workflows/release.yml` | 새 `v*` 태그 push | 동일 CI 성공 및 버전 일치 후 ZIP·SHA-256 Release 게시 |
 | `.github/workflows/pages.yml` | Release 워크플로 성공, 수동 | 공개 정식 릴리스의 검증된 ZIP으로 공식 `server-generate` 실행 및 Pages 게시 |
 
-실제 배포 단계에서는 공개 저장소 생성과 최초 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 설정합니다. 양쪽 OS의 원격 CI, Windows 개발 실행기, ZIP 설치 및 실제 재생을 확인한 뒤 사용하지 않은 `v0.5.0` 태그로 초기 릴리스를 시작합니다. 기존 태그나 릴리스를 덮어쓰지 않습니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올립니다.
+실제 배포 단계에서는 공개 저장소 생성과 최초 push 후 GitHub Pages의 **Build and deployment → Source → GitHub Actions**를 설정합니다. 양쪽 OS의 원격 CI, Windows 개발 실행기, ZIP 설치 및 실제 재생을 확인한 뒤 사용하지 않은 `v0.5.1` 태그로 초기 릴리스를 시작합니다. 기존 태그나 릴리스를 덮어쓰지 않습니다. 이후 버전은 매니페스트와 엔진 버전·변경 이력을 함께 올립니다.
 
 배포 후 사용할 원격 저장소 주소는 `https://zzamjak-cloud.github.io/CatAni-Blender/index.json`입니다. **아직 활성화된 설치 주소가 아닙니다.** Pages 게시 후 HTTP 응답·버전·ZIP 다운로드와 별도의 깨끗한 프로필에서 원격 설치를 확인해야 합니다.
 

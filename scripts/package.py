@@ -65,7 +65,9 @@ def build(blender, output_dir, tag=None):
                 continue
             path.chmod(0o644)
             os.utime(path, (946684800, 946684800))
-        env = dict(os.environ, BLENDER_USER_RESOURCES=str(work / "profile"))
+        # ZIP은 로컬 시간대로 시각을 기록한다. TZ를 고정하지 않으면 같은 소스라도
+        # 빌드 기계의 시간대에 따라 아카이브 바이트가 달라진다.
+        env = dict(os.environ, BLENDER_USER_RESOURCES=str(work / "profile"), TZ="UTC")
         prefix = [blender, "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1", "--command", "extension"]
         run_checked(prefix + ["validate", str(ROOT / "catani")], env, "extension_source")
         run_checked(prefix + ["validate", str(source)], env, "extension_staging")
