@@ -234,6 +234,21 @@ assert pending_index is not None, "받지 않은 공개 모션이 목록에 없�
 settings.motion_active = pending_index
 assert not bpy.ops.catani.motion_rename.poll(), "받지 않은 모션에 이름 바꾸기가 열렸습니다"
 
+# 함께 훑는 폴더(동봉 예제 자리)에 있는 파일도 그 폴더의 motions.json에 적는다.
+extra_directory = library / "extra"
+extra_directory.mkdir()
+(extra_directory / "unique_greeting.bvh").write_text(BVH_TEXT, encoding="utf-8")
+with patch.object(addon, "bundled_library_path", lambda: extra_directory):
+    settings.local_only = True
+    settings.motion_query = "unique greeting"
+    assert len(settings.motions) == 1, [item.name for item in settings.motions]
+    assert bpy.ops.catani.motion_rename(new_name="함께 훑는 폴더의 인사") == {"FINISHED"}, settings.motion_status
+    assert settings.motions[settings.motion_active].name == "함께 훑는 폴더의 인사", settings.motions[0].name
+recorded = json.loads((extra_directory / "motions.json").read_text(encoding="utf-8"))["motions"]
+assert [entry["name"] for entry in recorded] == ["함께 훑는 폴더의 인사"], recorded
+settings.local_only = False
+settings.motion_query = ""
+
 addon.unregister()
 assert not hasattr(bpy.types.Scene, "catani_settings")
 addon.register()

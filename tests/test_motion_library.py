@@ -120,6 +120,20 @@ class MotionLibraryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 scan_library(manifest)
 
+    def test_search_finds_file_name_after_rename(self):
+        """이름을 바꿔도 원본 파일 이름으로 찾을 수 있어야 한다."""
+        entry = CATALOG[0]
+        with tempfile.TemporaryDirectory(prefix="catani-motion-search-") as directory:
+            library = Path(directory)
+            target = library / entry.local_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("HIERARCHY\nMOTION\n", encoding="utf-8")
+            update_manifest(library, entry.local_path, {"name": "내가 고른 자세", "tags": []})
+            assets = scan_library(library)
+            self.assertEqual([a.name for a in search_assets(assets, "내가 자세")], ["내가 고른 자세"])
+            self.assertEqual([a.name for a in search_assets(assets, target.stem)], ["내가 고른 자세"])
+            self.assertEqual(search_assets(assets, "없는이름"), [])
+
     def test_catalog_name_survives_missing_manifest(self):
         """예전 버전이 받아 둔 파일은 motions.json이 없어도 카탈로그 이름으로 보여야 한다."""
         entry = CATALOG[0]

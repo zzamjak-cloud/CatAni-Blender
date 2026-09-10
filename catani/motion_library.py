@@ -276,12 +276,17 @@ def browse(directory, query="", extra=(), category="", local_only=False):
 
 
 def search_assets(assets, query):
+    """이름·설명·태그와 파일 이름을 함께 훑는다.
+
+    파일 이름을 넣어 두면 이름을 손으로 바꾼 뒤에도 `141_19` 같은 원본 번호로
+    찾을 수 있고, 검색 중에 이름을 바꿔도 항목이 목록에서 사라지지 않는다.
+    """
     tokens = normalize_tags(query)
     if not tokens:
         return list(assets)
     matches = []
     for asset in assets:
-        haystack = " ".join((asset.name, asset.description, " ".join(asset.tags))).casefold()
+        haystack = " ".join((asset.name, asset.description, " ".join(asset.tags), Path(asset.path).name)).casefold()
         if all(token in haystack for token in tokens):
             matches.append(asset)
     return matches

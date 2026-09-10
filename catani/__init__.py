@@ -1,6 +1,7 @@
 """CatAni: 공개 모션을 검색하고 캐릭터에 바로 적용하는 Extension."""
 
 import math
+import os
 from pathlib import Path
 import textwrap
 
@@ -109,16 +110,35 @@ def _selected(settings):
     return settings.motions[settings.motion_active]
 
 
+def _library_roots(settings):
+    """목록을 훑는 폴더들. refresh와 같은 순서를 유지한다."""
+    roots = []
+    for candidate in (settings.motion_library_path, str(bundled_library_path())):
+        text = str(candidate).strip()
+        if not text:
+            continue
+        library = Path(bpy.path.abspath(text)).expanduser().resolve()
+        if library not in roots:
+            roots.append(library)
+    return roots
+
+
 def _library_slot(settings, item):
-    """이름을 적어 둘 모션 폴더와 그 안에서의 상대 경로. 동봉 예제는 쓰기 대상이 아니다."""
+    """이름을 적어 둘 모션 폴더와 그 안에서의 상대 경로.
+
+    목록은 설정한 모션 폴더와 함께 훑는 폴더를 모두 담으므로, 파일이 실제로
+    들어 있는 쪽에 적는다. 두 폴더가 겹치면 더 안쪽을 쓴다.
+    """
     if not item.available or not item.path:
         raise ValueError("아직 받지 않은 모션입니다. 받은 뒤에 이름을 바꿀 수 있습니다.")
     path = Path(bpy.path.abspath(item.path)).expanduser().resolve()
-    library = Path(bpy.path.abspath(settings.motion_library_path or user_library_path())).expanduser().resolve()
-    try:
-        return library, path.relative_to(library).as_posix()
-    except ValueError:
-        raise ValueError("애드온에 동봉한 예제는 이름을 바꿀 수 없습니다. 모션 폴더 안의 파일만 바꿉니다.") from None
+    owners = [library for library in _library_roots(settings) if path.is_relative_to(library)]
+    if not owners:
+        raise ValueError("모션 폴더 밖의 파일은 이름을 바꿀 수 없습니다. 상세 설정에서 폴더를 확인하세요.")
+    library = max(owners, key=lambda candidate: len(candidate.parts))
+    if not os.access(library, os.W_OK):
+        raise ValueError(f"쓸 수 없는 폴더의 모션입니다. 파일을 모션 폴더로 옮긴 뒤 바꾸세요: {library}")
+    return library, path.relative_to(library).as_posix()
 
 
 def _target(context, settings):
