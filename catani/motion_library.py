@@ -219,6 +219,49 @@ def scan_library(directory):
     return sorted(assets, key=lambda asset: asset.name)
 
 
+_CATALOG_ASSETS = None
+
+
+def catalog_pool():
+    """카탈로그 전체를 이름순 (MotionAsset, 로컬 상대 경로)로 한 번만 만들어 둔다.
+
+    카탈로그는 파일에서 읽은 뒤 바뀌지 않는데 검색은 키 입력마다 일어난다.
+    2천 개가 넘는 항목을 매번 다시 만들면 입력이 눈에 띄게 밀린다.
+    """
+    global _CATALOG_ASSETS
+    if _CATALOG_ASSETS is None:
+        pool = [(MotionAsset(
+            identifier=f"catalog:{entry.id}", name=entry.name, path="", file_type="bvh",
+            tags=normalize_tags(entry.tags), description=entry.description,
+            source_name=entry.source_name, source_url=entry.source_url,
+            license_note=entry.license_note, license_url=entry.license_url,
+            download_url=entry.download_url, sha256=entry.sha256, blob_sha1=entry.blob_sha1,
+            source_id=entry.id, size_bytes=entry.size_bytes, available=False,
+            category=entry.category,
+        ), entry.local_path) for entry in CATALOG]
+        _CATALOG_ASSETS = tuple(sorted(pool, key=lambda pair: pair[0].name))
+    return _CATALOG_ASSETS
+
+
+def _present_names(roots, relatives):
+    """카탈로그 항목이 이미 폴더에 있는지 볼 상대 경로 집합.
+
+    항목마다 stat을 부르면 2천 번이 넘는다. 카탈로그가 쓰는 하위 폴더만
+    한 번씩 훑어 이름을 모은다.
+    """
+    parents = {Path(relative).parent.as_posix() for relative in relatives}
+    present = set()
+    for root in roots:
+        for parent in parents:
+            directory = root if parent == "." else root / parent
+            try:
+                names = os.listdir(directory)
+            except OSError:
+                continue
+            present.update(names if parent == "." else (f"{parent}/{name}" for name in names))
+    return present
+
+
 def catalog_assets(directories=(), existing_urls=()):
     """아직 받지 않은 공개 카탈로그 항목만 목록 형태로 돌려준다."""
     roots = []
@@ -227,20 +270,10 @@ def catalog_assets(directories=(), existing_urls=()):
         if text:
             roots.append(Path(text).expanduser().resolve())
     known = set(existing_urls)
-    assets = []
-    for entry in CATALOG:
-        if entry.download_url in known or any((root / entry.local_path).is_file() for root in roots):
-            continue
-        assets.append(MotionAsset(
-            identifier=f"catalog:{entry.id}", name=entry.name, path="", file_type="bvh",
-            tags=normalize_tags(entry.tags), description=entry.description,
-            source_name=entry.source_name, source_url=entry.source_url,
-            license_note=entry.license_note, license_url=entry.license_url,
-            download_url=entry.download_url, sha256=entry.sha256, blob_sha1=entry.blob_sha1,
-            source_id=entry.id, size_bytes=entry.size_bytes, available=False,
-            category=entry.category,
-        ))
-    return sorted(assets, key=lambda asset: asset.name)
+    pool = catalog_pool()
+    present = _present_names(roots, (relative for _, relative in pool)) if roots else set()
+    return [asset for asset, relative in pool
+            if asset.download_url not in known and relative not in present]
 
 
 def filter_assets(assets, category="", local_only=False):
