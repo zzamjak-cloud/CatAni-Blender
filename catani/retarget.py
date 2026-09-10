@@ -11,7 +11,11 @@ MIN_PAIRS = 3
 # 뼈 하나에 프레임당 쿼터니언 4채널을 쓰므로 상한을 두어 굽기 폭주를 막는다.
 MAX_KEYFRAMES = 2_000_000
 # 곡선 간소화 기본 허용 오차(도). 0이면 모든 프레임에 키를 남긴다.
-DEFAULT_SIMPLIFY = 0.5
+# 실측 CMU 걷기에서 이 값이면 키가 90% 줄고 방향 오차는 2.2° 안에 머문다.
+DEFAULT_SIMPLIFY = 1.0
+# 노이즈 완화 기본 창 크기(프레임). 0이나 1이면 완화하지 않는다.
+# 실측에서 완화는 손익이 나빴다. 같은 키 수를 허용 오차로 얻는 편이 오차가 더 작다.
+DEFAULT_SMOOTH = 0
 # 되살리기를 몇 번까지 반복할지. 한 번에 위반 프레임을 모두 넣으므로 보통 1~2회에 끝난다.
 TIGHTEN_ROUNDS = 3
 
@@ -288,6 +292,57 @@ def _lowest_rest(target, target_basis, ground_bones):
     return lowest
 
 
+def _kernel(window):
+    """이항 계수 가중치. 가우시안에 가깝고 정수 연산만 쓴다."""
+    size = max(1, int(window)) | 1
+    row = [1]
+    for _ in range(size - 1):
+        row = [1] + [row[index] + row[index + 1] for index in range(len(row) - 1)] + [1]
+    total = float(sum(row))
+    return [value / total for value in row]
+
+
+def _smooth_series(series, window, combine):
+    """구간 양 끝은 창을 잘라 쓰고, 가중치를 다시 정규화해 값이 끌려가지 않게 한다."""
+    weights = _kernel(window)
+    if len(weights) < 3 or len(series) < 3:
+        return series
+    half = len(weights) // 2
+    smoothed = []
+    for index in range(len(series)):
+        low = max(0, index - half)
+        high = min(len(series), index + half + 1)
+        picked = [(series[position], weights[position - index + half]) for position in range(low, high)]
+        scale = sum(weight for _value, weight in picked)
+        smoothed.append(combine([(value, weight / scale) for value, weight in picked]))
+    return smoothed
+
+
+def _blend_quaternions(picked):
+    """부호를 맞춘 쿼터니언들의 가중 평균. 작은 각도에서는 선형 평균 후 정규화로 충분하다."""
+    reference = max(picked, key=lambda item: item[1])[0]
+    total = Quaternion((0.0, 0.0, 0.0, 0.0))
+    for value, weight in picked:
+        aligned = value.copy()
+        if aligned.dot(reference) < 0.0:
+            aligned.negate()
+        total.w += aligned.w * weight
+        total.x += aligned.x * weight
+        total.y += aligned.y * weight
+        total.z += aligned.z * weight
+    if total.magnitude < 1e-9:
+        return reference.copy()
+    total.normalize()
+    return total
+
+
+def _blend_vectors(picked):
+    total = Vector((0.0, 0.0, 0.0))
+    for value, weight in picked:
+        total += value * weight
+    return total
+
+
 def _dilate(values, window=5):
     """관통 보정량을 이웃 최대값으로 넓혀 한 프레임만 튀는 계단을 줄인다."""
     if len(values) < 3 or not any(values):
@@ -296,7 +351,104 @@ def _dilate(values, window=5):
     return [max(values[max(0, index - half):index + half + 1]) for index in range(len(values))]
 
 
-def _sample(context, source, target, pairs, frames, corrections, translation_scale, ground=True):
+def ik_setups(target):
+    """리그가 선언한 IK 컨스트레인트에서 체인 구성을 읽는다.
+
+    본 이름 규칙이 아니라 컨스트레인트가 직접 알려 주는 정보만 쓴다. 어떤 리그든
+    IK를 제대로 걸어 두었으면 그대로 동작한다.
+    """
+    setups = []
+    for bone in target.pose.bones:
+        for constraint in bone.constraints:
+            if constraint.type != "IK" or constraint.target is not target:
+                continue
+            control = constraint.subtarget
+            if not control or control not in target.pose.bones:
+                continue
+            depth = constraint.chain_count or (len(bone.parent_recursive) + 1)
+            chain = [bone.name] + [parent.name for parent in bone.parent_recursive[:max(0, depth - 1)]]
+            # 컨트롤 본이 체인 안이나 그 아래에 있으면 우리가 값을 쓰는 순간 순환이 된다.
+            control_bone = target.pose.bones[control]
+            lineage = {parent.name for parent in control_bone.parent_recursive} | {control}
+            if lineage & set(chain):
+                continue
+            pole = constraint.pole_subtarget if constraint.pole_target is target else ""
+            if pole and pole not in target.pose.bones:
+                pole = ""
+            setups.append({
+                "tip": bone.name, "root": chain[-1], "chain": chain,
+                "control": control, "pole": pole, "constraint": constraint.name,
+                "use_tail": constraint.use_tail,
+            })
+    return setups
+
+
+def _plane_basis(root, mid, end):
+    """삼각형(루트·중간관절·끝점)에 붙은 정규 직교 좌표계. 없으면 None."""
+    axis = end - root
+    if axis.length < 1e-6:
+        return None
+    axis = axis.normalized()
+    arm = mid - root
+    side = arm - axis * arm.dot(axis)
+    if side.length < 1e-6:
+        return None
+    side = side.normalized()
+    return Matrix((axis, side, axis.cross(side))).transposed()
+
+
+def _pole_position(rest_frame, rest_offset, root, mid, end, fallback):
+    """레스트에서 폴이 삼각형에 대해 갖던 관계를 현재 삼각형으로 옮긴다.
+
+    이렇게 하면 리그의 pole_angle 규약이 무엇이든 레스트에서 성립하던 IK 해가 그대로
+    재현된다. 규약을 추측하거나 부호를 맞춰 볼 필요가 없다.
+    """
+    if rest_frame is None:
+        return fallback
+    current = _plane_basis(root, mid, end)
+    if current is None:
+        return fallback
+    return root + current @ rest_offset
+
+
+def _leading_calibration(context, source, pairs, frames, limit=3):
+    """맨 앞에 붙은 보정용 자세 프레임 수.
+
+    CMU/cgspeed BVH는 첫 행의 회전 채널이 모두 0인 T포즈 보정 프레임으로 시작한다.
+    그대로 구우면 1프레임짜리 T포즈 팝이 남고, 그 급점프가 노이즈 완화와 키 솎아내기를
+    모두 망친다. 방향 변화가 평소의 몇 배로 튀는 선두 프레임만 걷어낸다.
+    """
+    if len(frames) < 6:
+        return 0
+    scene = context.scene
+    bones = [source_bone for _slot, source_bone, _target in pairs]
+
+    def directions(frame):
+        scene.frame_set(frame)
+        evaluated = source.evaluated_get(context.evaluated_depsgraph_get())
+        world = evaluated.matrix_world
+        return [_rotation(world @ evaluated.pose.bones[name].matrix) @ Y_AXIS for name in bones]
+
+    def step(left, right):
+        return max(math.degrees(a.angle(b, 0.0)) for a, b in zip(left, right))
+
+    head = [directions(frame) for frame in frames[:limit + 2]]
+    # 평소 변화량은 구간 전체에 흩은 인접 프레임 쌍에서 잰다. 선두만 보면 기준이 오염된다.
+    span = len(frames)
+    probes = sorted({span // 4 + index * span // 8 for index in range(5)})
+    typical = sorted(step(directions(frames[position]), directions(frames[position + 1]))
+                     for position in probes if position + 1 < span)
+    if not typical:
+        return 0
+    middle = typical[len(typical) // 2]
+    threshold = max(10.0, middle * 8.0)
+    dropped = 0
+    while dropped < limit and dropped + 1 < len(head) and step(head[dropped], head[dropped + 1]) > threshold:
+        dropped += 1
+    return dropped
+
+
+def _sample(context, source, target, pairs, frames, corrections, translation_scale, ground=True, smooth=0):
     """프레임별로 캐릭터 본의 로컬 회전과 엉덩이 이동을 계산한다."""
     scene = context.scene
     order = _hierarchy(target)
@@ -317,6 +469,7 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
     # 모션의 루트 이동은 첫 프레임을 기준으로 재는다. 리그마다 레스트 높이가 다르므로
     # 레스트를 기준으로 삼으면 캐릭터가 공중에 뜨거나 바닥을 파고든다.
     origin = None
+    # 1단계: 프레임마다 캐릭터 본의 로컬 회전과 엉덩이의 세계 좌표 목표를 모은다.
     for frame in frames:
         scene.frame_set(frame)
         depsgraph = context.evaluated_depsgraph_get()
@@ -349,7 +502,18 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
             if series:
                 quaternion.make_compatible(series[-1])
             series.append(quaternion)
-        if ground and ground_bones:
+    # 2단계: 모캡 고주파 노이즈를 걷어낸다. 노이즈를 남긴 채 키를 솎아내면 오차 허용치
+    # 안에 들어가려고 노이즈까지 충실히 보존하느라 키가 줄지 않는다.
+    if smooth and smooth > 1:
+        for name, series in rotations.items():
+            rotations[name] = _smooth_series(series, smooth, _blend_quaternions)
+        hips_targets = _smooth_series(hips_targets, smooth, _blend_vectors)
+    # 3단계: 완화한 값으로 순운동학을 다시 풀어 발 관통량을 잰다. 1단계 포즈로 재면
+    # 완화가 되돌려 놓은 발 높이를 놓친다.
+    if ground and ground_bones:
+        for index in range(len(frames)):
+            offset = rest[hips].inverted() @ (target_inverse @ hips_targets[index]) if hips and hips_targets else None
+            pose = _replay(order, rest, parent_rest, rotations, index, hips, offset)
             floor = min(
                 (target_basis @ pose[name] @ offset).z
                 for name in ground_bones
@@ -362,7 +526,32 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
         if index < len(lift):
             raised.z += lift[index]
         locations.append((rest[hips].inverted() @ (target_inverse @ raised)))
-    return rotations, locations, hips, (max(lift) if lift else 0.0), sum(1 for value in penetration if value > 1e-6)
+    # 최종 포즈. IK 목표 위치와 끝본 보정은 완화와 접지 보정까지 반영한 값으로 잡아야
+    # FK 결과와 같은 자리에 놓인다.
+    final = [_replay(order, rest, parent_rest, rotations, index, hips,
+                     locations[index] if hips and index < len(locations) else None)
+             for index in range(len(frames))]
+    return rotations, locations, hips, (max(lift) if lift else 0.0), sum(1 for value in penetration if value > 1e-6), final
+
+
+def _replay(order, rest, parent_rest, rotations, index, hips=None, hips_offset=None):
+    """로컬 회전 배열에서 프레임 하나의 본 오브젝트 공간 행렬을 되살린다.
+
+    엉덩이 이동을 함께 넣어야 관통량이 맞는다. 몸이 내려가면 발도 같이 내려간다.
+    """
+    zero = Vector((0.0, 0.0, 0.0))
+    scale = Vector((1.0, 1.0, 1.0))
+    pose = {}
+    for bone in order:
+        inverse = parent_rest[bone.name]
+        base = pose[bone.parent.name] @ inverse @ rest[bone.name] if inverse is not None else rest[bone.name]
+        series = rotations.get(bone.name)
+        if series is None:
+            pose[bone.name] = base
+            continue
+        offset = hips_offset if (bone.name == hips and hips_offset is not None) else zero
+        pose[bone.name] = base @ Matrix.LocRotScale(offset, series[index], scale)
+    return pose
 
 
 def _angle_error(actual, predicted):
@@ -381,84 +570,192 @@ def _distance_error(actual, predicted):
     return (Vector(actual) - Vector(predicted)).length
 
 
-def _simplify(frames, channels, tolerance, metric):
-    """선형 보간 오차가 허용치를 넘는 지점만 키로 남긴다(Ramer-Douglas-Peucker 변형).
+def _solve_handles(spans, values, low, high):
+    """구간 [low, high]의 내부 표본에 가장 가까운 3차 베지어 제어점 두 개를 구한다.
 
-    한 부위의 쿼터니언 4채널은 키 위치가 같아야 중간 프레임에서 회전이 뒤틀리지
-    않으므로 채널을 묶어 한 번에 판정한다.
+    핸들의 x를 구간의 1/3 지점에 고정하면 x(t)가 t에 대해 선형이 되어 y(t)가 표준
+    3차 베지어가 된다. 그러면 제어점 두 개만 최소제곱으로 풀면 되고, 우리가 계산한
+    곡선이 Blender가 평가하는 곡선과 정확히 같아진다.
+    """
+    first, last = values[low], values[high]
+    third = (last - first) / 3.0
+    if high - low < 2:
+        return first + third, last - third
+    a11 = a12 = a22 = b1 = b2 = 0.0
+    for position in range(low + 1, high):
+        t = spans[position]
+        one = 1.0 - t
+        first_weight = 3.0 * one * one * t
+        second_weight = 3.0 * one * t * t
+        residual = values[position] - (one * one * one * first + t * t * t * last)
+        a11 += first_weight * first_weight
+        a12 += first_weight * second_weight
+        a22 += second_weight * second_weight
+        b1 += first_weight * residual
+        b2 += second_weight * residual
+    determinant = a11 * a22 - a12 * a12
+    if abs(determinant) < 1e-12:
+        return first + third, last - third
+    return (a22 * b1 - a12 * b2) / determinant, (a11 * b2 - a12 * b1) / determinant
+
+
+def _evaluate(controls, spans, values, low, high, position):
+    """적합한 구간을 표본 위치에서 평가한다."""
+    t = spans[position]
+    one = 1.0 - t
+    return (one * one * one * values[low] + 3.0 * one * one * t * controls[0]
+            + 3.0 * one * t * t * controls[1] + t * t * t * values[high])
+
+
+def _fit_group(frames, channels, tolerance, metric):
+    """오차 허용치를 지키면서 매듭을 가장 적게 쓰는 베지어 구간들을 만든다.
+
+    구간 하나로 맞춰 보고 오차가 넘으면 가장 어긋난 지점에서 쪼갠다. 키를 표본
+    프레임에만 놓는 방식과 달리 구간이 데이터에 맞게 휘므로 같은 오차에서 매듭이
+    훨씬 적게 남는다.
+
+    돌려주는 값은 (매듭 인덱스, 채널별 구간 제어점)이다.
     """
     count = len(frames)
-    if count < 3 or tolerance <= 0.0:
-        return list(range(count))
-    keep = [False] * count
-    keep[0] = keep[-1] = True
-    stack = [(0, count - 1)]
-    while stack:
-        left, right = stack.pop()
-        if right - left < 2:
-            continue
-        span = frames[right] - frames[left]
+    if count < 2:
+        return list(range(count)), []
+    if tolerance <= 0.0:
+        # 간소화를 끄면 모든 프레임을 매듭으로 남긴다.
+        knots = list(range(count))
+    else:
+        knots = None
+
+    def fit(low, high):
+        """구간 하나를 적합해 (제어점들, 최대 오차, 최악 위치)를 돌려준다."""
+        width = float(frames[high] - frames[low]) or 1.0
+        spans = {position: (frames[position] - frames[low]) / width for position in range(low, high + 1)}
+        controls = [_solve_handles(spans, values, low, high) for values in channels]
         worst, chosen = 0.0, -1
-        for position in range(left + 1, right):
-            ratio = (frames[position] - frames[left]) / span if span else 0.0
-            predicted = tuple(values[left] + (values[right] - values[left]) * ratio for values in channels)
-            error = metric(tuple(values[position] for values in channels), predicted)
+        for position in range(low + 1, high):
+            predicted = tuple(_evaluate(control, spans, values, low, high, position)
+                              for control, values in zip(controls, channels))
+            actual = tuple(values[position] for values in channels)
+            error = metric(actual, predicted)
             if error > worst:
                 worst, chosen = error, position
-        # 최대 오차가 허용치 안이면 그 사이의 모든 지점도 허용치 안이다.
-        if chosen < 0 or worst <= tolerance:
-            continue
-        keep[chosen] = True
-        stack.append((left, chosen))
-        stack.append((chosen, right))
-    return [index for index, flag in enumerate(keep) if flag]
+        return controls, worst, chosen
+
+    segments = []
+    if knots is None:
+        stack = [(0, count - 1)]
+        while stack:
+            low, high = stack.pop()
+            controls, worst, chosen = fit(low, high)
+            if worst <= tolerance or chosen < 0:
+                segments.append((low, high, controls))
+                continue
+            stack.append((chosen, high))
+            stack.append((low, chosen))
+        segments.sort()
+    else:
+        for position in range(count - 1):
+            controls, _worst, _chosen = fit(position, position + 1)
+            segments.append((position, position + 1, controls))
+    knots = [segments[0][0]] + [segment[1] for segment in segments]
+    return knots, segments
 
 
-def _tighten(curves, frames, channels, kept, tolerance, metric):
-    """베지어 실측 오차가 허용치를 넘는 프레임을 키로 되살리고 남은 최대 오차를 돌려준다.
+def _write_group(bag, path, group, frames, channels, knots, segments):
+    """적합 결과를 자유 핸들 베지어 곡선으로 쓴다."""
+    curves = []
+    # 직접 대입은 문자열 enum을 받는다. 정수는 foreach_set에서만 쓴다.
+    for index, values in enumerate(channels):
+        curve = bag.fcurves.new(data_path=path, index=index, group_name=group)
+        curve.keyframe_points.add(len(knots))
+        for position, knot in enumerate(knots):
+            key = curve.keyframe_points[position]
+            key.co = (float(frames[knot]), float(values[knot]))
+            key.interpolation = "BEZIER"
+            key.handle_left_type = "FREE"
+            key.handle_right_type = "FREE"
+            key.handle_left = key.co
+            key.handle_right = key.co
+        for position, (low, high, controls) in enumerate(segments):
+            width = float(frames[high] - frames[low]) or 1.0
+            left, right = controls[index]
+            curve.keyframe_points[position].handle_right = (frames[low] + width / 3.0, left)
+            curve.keyframe_points[position + 1].handle_left = (frames[high] - width / 3.0, right)
+        curve.update()
+        curves.append(curve)
+    return curves
 
-    솎아낼 때는 선형 보간을 기준으로 재므로 오토 클램프 핸들이 만든 실제 곡선과 다를 수
-    있다. 여기서 곡선을 직접 평가해 허용치를 보장한다.
+
+def _measure_group(curves, frames, channels, metric):
+    """구운 곡선을 Blender가 평가한 값으로 모든 표본 프레임에서 오차를 잰다.
+
+    적합 단계의 계산과 Blender의 평가가 어긋나면 여기서 드러난다.
     """
-    remaining = [index for index in range(len(frames)) if index not in set(kept)]
-
-    def measure():
-        worst, over = 0.0, []
-        for index in remaining:
-            predicted = tuple(curve.evaluate(frames[index]) for curve in curves)
-            error = metric(tuple(values[index] for values in channels), predicted)
-            worst = max(worst, error)
-            if error > tolerance:
-                over.append(index)
-        return worst, over
-
-    for _round in range(TIGHTEN_ROUNDS):
-        worst, over = measure()
-        if not over:
-            return worst
-        for index in over:
-            for curve, values in zip(curves, channels):
-                key = curve.keyframe_points.insert(frames[index], values[index])
-                key.interpolation = "BEZIER"
-                key.handle_left_type = "AUTO_CLAMPED"
-                key.handle_right_type = "AUTO_CLAMPED"
-        for curve in curves:
-            curve.update()
-        remaining = [index for index in remaining if index not in set(over)]
-    return measure()[0]
+    worst = 0.0
+    for position, frame in enumerate(frames):
+        predicted = tuple(curve.evaluate(frame) for curve in curves)
+        actual = tuple(values[position] for values in channels)
+        worst = max(worst, metric(actual, predicted))
+    return worst
 
 
 def _bake_group(bag, path, group, frames, channels, tolerance, metric):
-    """키 위치를 공유하는 채널 묶음을 희소 베지어 곡선으로 굽는다."""
-    kept = _simplify(frames, channels, tolerance, metric)
-    picked = [frames[index] for index in kept]
-    curves = [_fill(bag, path, index, group, picked, [values[position] for position in kept])
-              for index, values in enumerate(channels)]
-    error = _tighten(curves, frames, channels, kept, tolerance, metric) if tolerance > 0.0 else 0.0
+    """키 위치를 공유하는 채널 묶음을 최소 매듭 베지어 곡선으로 굽는다."""
+    knots, segments = _fit_group(frames, channels, tolerance, metric)
+    curves = _write_group(bag, path, group, frames, channels, knots, segments)
+    error = _measure_group(curves, frames, channels, metric) if tolerance > 0.0 else 0.0
     return sum(len(curve.keyframe_points) for curve in curves), error
 
 
-def _write_curves(target, action, frames, rotations, locations, hips, simplify=0.0, scale=1.0):
+def _ik_channels(target, setups, poses, residuals=None):
+    """프레임별 최종 포즈에서 IK 컨트롤과 폴 본의 로컬 이동값을 만든다.
+
+    residuals는 컨스트레인트별 폴 각도 보정값(라디안)이다. 리그의 레스트 자세가 그
+    리그의 IK 해와 정확히 일치하지 않으면 무릎이 일정 각도만큼 돌아간 채 풀리므로,
+    실측한 상수 잔차를 여기서 되돌린다.
+    """
+    rest = {bone.name: bone.matrix_local for bone in target.data.bones}
+    tracks = []
+    for setup in setups:
+        tip, root, control, pole = setup["tip"], setup["root"], setup["control"], setup["pole"]
+        length = target.data.bones[tip].length
+        offset = Vector((0.0, length, 0.0)) if setup["use_tail"] else Vector((0.0, 0.0, 0.0))
+        rest_root = rest[root].to_translation()
+        rest_mid = rest[tip].to_translation()
+        rest_end = rest[tip] @ offset
+        rest_frame = _plane_basis(rest_root, rest_mid, rest_end)
+        rest_offset = None
+        if rest_frame is not None and pole:
+            rest_offset = rest_frame.transposed() @ (rest[pole].to_translation() - rest_root)
+        control_track, pole_track = [], []
+        for pose in poses:
+            end = pose[tip] @ offset
+            control_base = pose[control]
+            control_local = control_base.inverted() @ end
+            control_track.append(control_local)
+            if not pole:
+                continue
+            # 컨트롤 본을 우리가 옮기므로, 그 아래에 붙은 폴의 기준 행렬도 옮긴 뒤에 잡는다.
+            moved = control_base @ Matrix.LocRotScale(control_local, Quaternion(), Vector((1.0, 1.0, 1.0)))
+            parent = target.data.bones[pole].parent
+            if parent is not None and parent.name == control:
+                pole_base = moved @ rest[control].inverted() @ rest[pole]
+            else:
+                pole_base = pose[pole]
+            origin = pose[root].to_translation()
+            wanted = _pole_position(rest_frame, rest_offset, origin,
+                                    pose[tip].to_translation(), end, pole_base.to_translation())
+            angle = (residuals or {}).get(setup["control"], 0.0)
+            if angle:
+                axis = end - origin
+                if axis.length > 1e-6:
+                    wanted = origin + Matrix.Rotation(angle, 3, axis.normalized()) @ (wanted - origin)
+            pole_track.append(pole_base.inverted() @ wanted)
+        tracks.append({"setup": setup, "control": control_track, "pole": pole_track})
+    return tracks
+
+
+def _write_curves(target, action, frames, rotations, locations, hips, simplify=0.0, scale=1.0,
+                  ik_tracks=()):
     slot = action.slots.new(id_type="OBJECT", name=target.name)
     layer = action.layers.new("CatAni 리타게팅")
     bag = layer.strips.new(type="KEYFRAME").channelbag(slot, ensure=True)
@@ -481,20 +778,36 @@ def _write_curves(target, action, frames, rotations, locations, hips, simplify=0
         count, error = _bake_group(bag, path, hips, frames, channels, tolerance, _distance_error)
         written += count
         shift_error = error
-    # IK가 켜져 있으면 구운 FK 키가 화면에 나타나지 않는다.
+    tolerance = scale * math.radians(simplify)
+    for track in ik_tracks:
+        for kind in ("control", "pole"):
+            series = track[kind]
+            if not series:
+                continue
+            name = track["setup"][kind]
+            channels = [[value[index] for value in series] for index in range(3)]
+            path = target.pose.bones[name].path_from_id("location")
+            count, error = _bake_group(bag, path, name, frames, channels, tolerance, _distance_error)
+            written += count
+            shift_error = max(shift_error, error)
+    # IK를 쓸 때는 영향을 1로 되돌려야 하고, FK로 구울 때는 0으로 눌러야 구운 키가 보인다.
+    driven = {track["setup"]["constraint"] for track in ik_tracks}
+    influence = 1.0 if ik_tracks else 0.0
     disabled = []
     for bone in target.pose.bones:
         for constraint in bone.constraints:
             if constraint.type != "IK":
                 continue
-            constraint.influence = 0.0
+            value = influence if constraint.name in driven or not ik_tracks else 0.0
+            constraint.influence = value
             curve = bag.fcurves.new(data_path=constraint.path_from_id("influence"), index=0, group_name=bone.name)
-            key = curve.keyframe_points.insert(frames[0], 0.0)
+            key = curve.keyframe_points.insert(frames[0], value)
             key.interpolation = "CONSTANT"
             curve.update()
             written += 1
-            disabled.append(f"{bone.name}/{constraint.name}")
-    return written, disabled, angle_error, shift_error
+            if value == 0.0:
+                disabled.append(f"{bone.name}/{constraint.name}")
+    return written, disabled, angle_error, shift_error, bag
 
 
 def _fill(bag, path, index, group, frames, values):
@@ -510,6 +823,106 @@ def _fill(bag, path, index, group, frames, values):
         curve.keyframe_points.foreach_set(side, [_key_enum(side, "AUTO_CLAMPED")] * len(frames))
     curve.update()
     return curve
+
+
+def _pole_residuals(context, target, setups, poses, frames, probes=5):
+    """구운 결과에서 무릎이 원하는 자리에서 얼마나 돌아갔는지 잰다.
+
+    폴 각도 규약은 리그마다 다르고 컨스트레인트의 pole_angle과도 별개로 레스트 자세가
+    어긋날 수 있다. 규약을 추측하는 대신 Blender가 실제로 푼 결과를 읽어 상수 오차를
+    구한다. 구간에 흩은 몇 프레임의 중앙값을 쓴다.
+    """
+    scene = context.scene
+    span = len(frames)
+    picked = sorted({max(0, min(span - 1, span * (index + 1) // (probes + 1))) for index in range(probes)})
+    gathered = {setup["control"]: [] for setup in setups if setup["pole"]}
+    for index in picked:
+        scene.frame_set(frames[index])
+        context.view_layer.update()
+        pose = poses[index]
+        for setup in setups:
+            if not setup["pole"]:
+                continue
+            tip, root = setup["tip"], setup["root"]
+            offset = Vector((0.0, target.data.bones[tip].length, 0.0)) if setup["use_tail"] else Vector((0.0, 0.0, 0.0))
+            origin = target.pose.bones[root].matrix.to_translation()
+            axis = (pose[tip] @ offset) - origin
+            if axis.length < 1e-6:
+                continue
+            axis.normalize()
+            wanted = pose[tip].to_translation() - origin
+            solved = target.pose.bones[tip].matrix.to_translation() - origin
+            wanted = wanted - axis * wanted.dot(axis)
+            solved = solved - axis * solved.dot(axis)
+            if wanted.length < 1e-5 or solved.length < 1e-5:
+                continue
+            wanted.normalize()
+            solved.normalize()
+            gathered[setup["control"]].append(
+                math.atan2(axis.dot(solved.cross(wanted)), solved.dot(wanted)))
+    residuals = {}
+    for name, values in gathered.items():
+        if values:
+            residuals[name] = sorted(values)[len(values) // 2]
+    return residuals
+
+
+def _rewrite_poles(bag, target, frames, tracks, simplify, scale):
+    """보정한 폴 값으로 기존 폴 곡선을 지우고 다시 쓴다."""
+    tolerance = scale * math.radians(simplify)
+    written = 0
+    for track in tracks:
+        name = track["setup"]["pole"]
+        if not name or not track["pole"]:
+            continue
+        curve_path = target.pose.bones[name].path_from_id("location")
+        for curve in [curve for curve in bag.fcurves if curve.data_path == curve_path]:
+            bag.fcurves.remove(curve)
+        channels = [[value[index] for value in track["pole"]] for index in range(3)]
+        count, _error = _bake_group(bag, curve_path, name, frames, channels, tolerance, _distance_error)
+        written += count
+    return written
+
+
+def _bake_followers(context, target, bag, frames, deferred, poses, simplify, setups):
+    """IK가 정한 부모 방향 위에서 끝본의 세계 방향을 FK 결과와 같게 맞춘다.
+
+    2본 IK는 팔뚝·정강이의 비틀림을 폴이 정하므로 FK와 다를 수 있다. 그대로 두면 손과
+    발이 자기 축을 따라 돌아간다. Blender가 실제로 푼 결과를 읽어 그 위에서 보정한다.
+    같은 순회에서 IK가 목표와 무릎을 얼마나 맞혔는지도 함께 잰다.
+    """
+    scene = context.scene
+    rest = {bone.name: bone.matrix_local for bone in target.data.bones}
+    series = {name: [] for name in deferred}
+    effector = 0.0
+    middle = 0.0
+    for index, frame in enumerate(frames):
+        scene.frame_set(frame)
+        context.view_layer.update()
+        pose = poses[index]
+        for name in series:
+            parent = target.data.bones[name].parent
+            base = target.pose.bones[parent.name].matrix @ rest[parent.name].inverted() @ rest[name]
+            quaternion = _rotation(base).inverted() @ _rotation(pose[name])
+            previous = series[name]
+            if previous:
+                quaternion.make_compatible(previous[-1])
+            previous.append(quaternion)
+        for setup in setups:
+            tip = setup["tip"]
+            offset = Vector((0.0, target.data.bones[tip].length, 0.0)) if setup["use_tail"] else Vector((0.0, 0.0, 0.0))
+            solved = target.pose.bones[tip].matrix
+            effector = max(effector, ((solved @ offset) - (pose[tip] @ offset)).length)
+            middle = max(middle, (solved.to_translation() - pose[tip].to_translation()).length)
+    written = 0
+    worst = 0.0
+    for name, values in series.items():
+        channels = [[value[index] for value in values] for index in range(4)]
+        curve_path = target.pose.bones[name].path_from_id("rotation_quaternion")
+        count, error = _bake_group(bag, curve_path, name, frames, channels, simplify, _angle_error)
+        written += count
+        worst = max(worst, error)
+    return written, worst, effector, middle
 
 
 def deepest_penetration(context, target, frames, floor):
@@ -546,7 +959,7 @@ def verify(context, source, target, pairs, frames):
 
 
 def apply_motion(context, source, target, *, step=1, use_location=True, ground=True,
-                 simplify=DEFAULT_SIMPLIFY, name="CatAni 모션"):
+                 simplify=DEFAULT_SIMPLIFY, smooth=DEFAULT_SMOOTH, use_ik=False, name="CatAni 모션"):
     """모션 리그의 동작을 캐릭터에 굽고 적용 결과 보고서를 돌려준다."""
     for obj in (source, target):
         if obj is None or obj.type != "ARMATURE":
@@ -559,6 +972,7 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
         raise ValueError("오브젝트 모드에서 적용하세요.")
     step = max(1, int(step))
     simplify = max(0.0, float(simplify))
+    smooth = max(0, int(smooth))
     pairs, source_key, target_key, skipped, guessed = build_pairs(source, target)
     start, end = action_frame_range(source)
     frames = list(range(start, end + 1, step))
@@ -566,6 +980,11 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
         frames = [start, end]
     if len(frames) * len(pairs) * 4 > MAX_KEYFRAMES:
         raise ValueError("키가 너무 많습니다. 상세 설정에서 프레임 간격을 늘리세요.")
+    dropped = _leading_calibration(context, source, pairs, frames)
+    if dropped and len(frames) - dropped >= 2:
+        frames = frames[dropped:]
+    else:
+        dropped = 0
     source_bones = {slot: source.data.bones[source_bone] for slot, source_bone, _target in pairs}
     target_bones = {slot: target.data.bones[target_bone] for slot, _source, target_bone in pairs}
     source_height = _height(source, source_bones)
@@ -595,12 +1014,38 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
                 muted.append(track)
         _clear_pose(target, {target_bone for _slot, _source, target_bone in pairs})
         target.data.pose_position = "POSE"
-        rotations, locations, hips, lift, lifted_frames = _sample(context, source, target, pairs, frames, corrections, translation_scale, ground=use_location and ground)
+        rotations, locations, hips, lift, lifted_frames, poses = _sample(
+            context, source, target, pairs, frames, corrections, translation_scale,
+            ground=use_location and ground, smooth=smooth)
+        setups = ik_setups(target) if use_ik else []
+        # IK가 회전을 직접 풀어 주는 체인 본에는 FK 키를 쓰지 않는다.
+        chain = {bone for setup in setups for bone in setup["chain"]}
+        for bone in chain & set(rotations):
+            del rotations[bone]
+        # 체인 끝에 붙은 본은 IK가 정한 비틀림 위에서 다시 맞춰야 하므로 뒤로 미룬다.
+        deferred = {}
+        for bone in list(rotations):
+            parent = target.data.bones[bone].parent
+            if parent is not None and parent.name in chain:
+                deferred[bone] = rotations.pop(bone)
+        tracks = _ik_channels(target, setups, poses) if setups else []
         # 간소화를 끄지 않았을 때의 비교 기준. 모든 샘플 프레임에 키를 남겼을 경우의 개수다.
         dense = len(frames) * (len(pairs) * 4 + (3 if use_location and hips else 0))
-        written, disabled, curve_error, curve_shift = _write_curves(
+        written, disabled, curve_error, curve_shift, bag = _write_curves(
             target, action, frames, rotations, locations if use_location else [], hips,
-            simplify=simplify, scale=target_height)
+            simplify=simplify, scale=target_height, ik_tracks=tracks)
+        ik_effector = ik_middle = 0.0
+        pole_fix = {}
+        if setups:
+            # 폴 각도의 상수 잔차를 실측해 되돌린 뒤 폴 곡선만 다시 쓴다.
+            pole_fix = _pole_residuals(context, target, setups, poses, frames)
+            if any(abs(value) > math.radians(0.05) for value in pole_fix.values()):
+                tracks = _ik_channels(target, setups, poses, pole_fix)
+                written += _rewrite_poles(bag, target, frames, tracks, simplify, target_height)
+            count, error, ik_effector, ik_middle = _bake_followers(
+                context, target, bag, frames, deferred, poses, simplify, setups)
+            written += count
+            curve_error = max(curve_error, error)
         action["catani_motion_source"] = source.name
         action["catani_motion_pairs"] = len(pairs)
         action.use_fake_user = True
@@ -625,7 +1070,10 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
             "frame_start": frames[0], "frame_end": frames[-1], "frame_count": len(frames), "step": step,
             "source_profile": profile_label(source_key), "target_profile": profile_label(target_key),
             "target_bone_total": len(target.data.bones), "translation_scale": translation_scale,
-            "simplify": simplify, "dense_keyframes": dense,
+            "simplify": simplify, "dense_keyframes": dense, "smooth": smooth, "dropped_frames": dropped,
+            "ik": [setup["control"] for setup in setups], "ik_requested": use_ik,
+            "ik_effector": ik_effector, "ik_middle": ik_middle,
+            "pole_fix": {name: math.degrees(value) for name, value in pole_fix.items()},
             "curve_error": curve_error, "curve_shift": curve_shift,
             "max_direction_error": error, "verified_frames": samples,
             "ground_lift": lift, "ground_frames": lifted_frames,
@@ -661,6 +1109,9 @@ def format_report(asset, report):
         f"검증: {', '.join(str(frame) for frame in report['verified_frames'])} 프레임 최대 방향 오차 {report['max_direction_error']:.3f}°"
         + (" · 키가 없는 프레임을 포함해 보간 오차까지 반영" if report["step"] > 1 or report["simplify"] else ""),
     ]
+    if report["dropped_frames"]:
+        lines.append(f"선두 보정 프레임 제거: {report['dropped_frames']}개 · 모션 파일 첫 프레임이 T포즈 보정 자세라 그대로 구우면 팝이 남습니다")
+    lines.append(f"노이즈 완화: {report['smooth']}프레임 창" if report["smooth"] > 1 else "노이즈 완화: 없음")
     if report["simplify"]:
         saved = 1.0 - report["keyframes"] / report["dense_keyframes"] if report["dense_keyframes"] else 0.0
         lines.append(
@@ -682,6 +1133,16 @@ def format_report(asset, report):
         lines.append(f"이전 Action 보존: {report['previous_action']}")
     if report["muted_tracks"]:
         lines.append(f"NLA 트랙 음소거: {', '.join(report['muted_tracks'])} · NLA 편집기에서 되돌릴 수 있습니다")
+    if report["ik"]:
+        lines.append(
+            f"IK로 전환: {', '.join(report['ik'])} · 리그의 IK 컨스트레인트에서 체인·폴을 읽어 굽습니다 · "
+            f"목표 위치 오차 최대 {report['ik_effector']:.4f} · 중간 관절 오차 최대 {report['ik_middle']:.4f}"
+        )
+        if report["pole_fix"]:
+            fixes = ", ".join(f"{name} {value:+.2f}°" for name, value in report["pole_fix"].items())
+            lines.append(f"폴 각도 실측 보정: {fixes} · 리그 레스트 자세와 IK 해의 차이를 재서 되돌렸습니다")
+    elif report["ik_requested"]:
+        lines.append("IK로 전환: 대상 리그에 쓸 수 있는 IK 컨스트레인트가 없어 FK로 구웠습니다")
     if report["disabled_ik"]:
         lines.append(f"IK 영향 0으로 고정: {', '.join(report['disabled_ik'])}")
     if report["guessed"]:

@@ -236,11 +236,17 @@ class CatAniSettings(bpy.types.PropertyGroup):
     motion_library_path: StringProperty(name="모션 폴더", description="공개 모션을 내려받아 둘 폴더. 애드온에 동봉한 예제는 항상 함께 검색됩니다",
                                        subtype="DIR_PATH", default=user_library_path(), update=_on_search)
     frame_step: IntProperty(name="프레임 간격", description="1이면 모든 프레임에 키를 만듭니다", default=1, min=1, max=10)
+    smooth_window: IntProperty(name="노이즈 완화(프레임)",
+                               description="모캡 흔들림을 이 프레임 수의 창으로 걷어냅니다. 노이즈를 남기면 키를 솎아내도 줄지 않습니다. 0이나 1이면 완화하지 않습니다",
+                               default=retarget.DEFAULT_SMOOTH, min=0, max=31)
     simplify_error: FloatProperty(name="곡선 간소화 오차",
                                   description="이 각도 안에서 키를 솎아내고 베지어 곡선으로 만듭니다. 값이 크면 키가 적어 손으로 고치기 쉽고, 0이면 모든 프레임에 키를 남깁니다",
                                   default=math.radians(retarget.DEFAULT_SIMPLIFY), min=0.0, max=math.radians(5.0), unit="ROTATION")
     use_location: BoolProperty(name="이동 적용", description="엉덩이 이동을 캐릭터 비율에 맞춰 함께 적용합니다", default=True)
     ground_contact: BoolProperty(name="바닥 관통 보정", description="발이 바닥 아래로 내려가는 프레임에서 몸 전체를 필요한 만큼만 올립니다", default=True)
+    use_ik: BoolProperty(name="IK로 전환",
+                         description="캐릭터 리그에 IK 컨스트레인트가 있으면 팔다리를 IK 컨트롤 본으로 굽습니다. 체인·폴 구성은 리그의 컨스트레인트에서 직접 읽습니다",
+                         default=True)
     hide_source: BoolProperty(name="모션 원본 리그 숨기기", default=True)
     download_status: StringProperty(name="다운로드", default="")
     download_progress: FloatProperty(name="진행", min=0.0, max=1.0, subtype="FACTOR")
@@ -312,7 +318,8 @@ class CATANI_OT_motion_apply(bpy.types.Operator):
             obj.hide_set(False)
         try:
             report = retarget.apply_motion(context, source, target, step=settings.frame_step, use_location=settings.use_location,
-                                           ground=settings.ground_contact, simplify=math.degrees(settings.simplify_error), name=f"CatAni {item.name}")
+                                           ground=settings.ground_contact, simplify=math.degrees(settings.simplify_error),
+                                           smooth=settings.smooth_window, use_ik=settings.use_ik, name=f"CatAni {item.name}")
         except Exception:
             if collection is not None:
                 bpy.data.batch_remove(ids=[*created, collection])
@@ -478,9 +485,11 @@ class CATANI_OT_settings(bpy.types.Operator):
         column = layout.column()
         column.prop(settings, "motion_library_path")
         column.prop(settings, "frame_step")
+        column.prop(settings, "smooth_window")
         column.prop(settings, "simplify_error")
         column.prop(settings, "use_location")
         column.prop(settings, "ground_contact")
+        column.prop(settings, "use_ik")
         column.prop(settings, "hide_source")
         row = column.row(align=True)
         row.operator("catani.motion_refresh", icon="FILE_REFRESH")

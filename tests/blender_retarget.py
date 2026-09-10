@@ -47,6 +47,9 @@ settings.target_armature = target
 settings.frame_step = 1
 # 1~7번은 프레임마다 샘플값과 정확히 맞는지 보는 검사이므로 간소화를 끄고 잰다.
 settings.simplify_error = 0.0
+# 1~8번은 FK 경로를 검사한다. IK 전환은 9번에서 따로 본다.
+settings.use_ik = False
+settings.smooth_window = 0
 
 before = set(bpy.data.objects)
 assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
@@ -162,10 +165,18 @@ rotation_curves = [curve for layer in simplified_action.layers for strip in laye
 assert len(rotation_curves) == len(pairs) * 4, len(rotation_curves)
 simplified_keys = sum(len(curve.keyframe_points) for curve in rotation_curves)
 dense_keys = span * len(rotation_curves)
-assert simplified_keys < dense_keys * 0.5, f"키가 충분히 줄지 않았습니다: {simplified_keys} / {dense_keys}"
+assert simplified_keys < dense_keys * 0.25, f"키가 충분히 줄지 않았습니다: {simplified_keys} / {dense_keys}"
 assert all(key.interpolation == "BEZIER" for curve in rotation_curves for key in curve.keyframe_points)
-assert all(key.handle_left_type == "AUTO_CLAMPED" and key.handle_right_type == "AUTO_CLAMPED"
+# 최소제곱으로 접선을 직접 맞추므로 자동 핸들이 아니라 자유 핸들을 쓴다.
+assert all(key.handle_left_type == "FREE" and key.handle_right_type == "FREE"
            for curve in rotation_curves for key in curve.keyframe_points)
+# 핸들 x는 구간의 1/3 지점이어야 x(t)가 선형이고 우리 계산과 Blender 평가가 일치한다.
+for curve in rotation_curves:
+    points = curve.keyframe_points
+    for position in range(len(points) - 1):
+        width = points[position + 1].co.x - points[position].co.x
+        assert abs(points[position].handle_right.x - (points[position].co.x + width / 3.0)) < 1e-3
+        assert abs(points[position + 1].handle_left.x - (points[position + 1].co.x - width / 3.0)) < 1e-3
 # 한 부위의 쿼터니언 4채널은 키 위치가 같아야 중간 프레임에서 회전이 뒤틀리지 않는다.
 channel_frames = {}
 for curve in rotation_curves:
@@ -190,8 +201,68 @@ assert lowest_simplified >= rest_floor - 0.02, f"간소화가 발을 바닥 아�
 assert f"곡선 간소화: 허용 오차 {retarget.DEFAULT_SIMPLIFY:.2f}°" in settings.apply_report, settings.apply_report
 assert "% 감소)" in settings.apply_report, settings.apply_report
 
+# 9. IK로 전환하면 리그의 컨스트레인트에서 체인을 읽어 IK 컨트롤 본을 굽는지.
+setups = retarget.ik_setups(target)
+assert len(setups) == 4, [s["control"] for s in setups]
+assert {s["control"] for s in setups} == {"IK_Arm.L", "IK_Arm.R", "IK_Target.L", "IK_Target.R"}
+for setup in setups:
+    # 컨트롤 본이 체인 아래에 있으면 값을 쓰는 순간 순환이 되므로 걸러져야 한다.
+    lineage = {p.name for p in target.pose.bones[setup["control"]].parent_recursive} | {setup["control"]}
+    assert not (lineage & set(setup["chain"])), setup
+chain_bones = {name for setup in setups for name in setup["chain"]}
+
+settings.use_ik = True
+settings.simplify_error = 0.0
+assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
+ik_action = target.animation_data.action
+paths = {curve.data_path for layer in ik_action.layers for strip in layer.strips
+         for bag in strip.channelbags for curve in bag.fcurves}
+for setup in setups:
+    assert f'pose.bones["{setup["control"]}"].location' in paths, setup["control"]
+    assert f'pose.bones["{setup["pole"]}"].location' in paths, setup["pole"]
+# IK가 직접 푸는 체인 본에는 FK 회전 키를 남기지 않는다.
+for name in chain_bones:
+    assert f'pose.bones["{name}"].rotation_quaternion' not in paths, name
+# IK 영향은 1로 되돌려야 컨트롤 본이 실제로 동작한다.
+for bone in target.pose.bones:
+    for constraint in bone.constraints:
+        if constraint.type == "IK":
+            assert constraint.influence == 1.0, f"{bone.name} IK 영향이 켜지지 않았습니다"
+
+# 간소화를 끈 IK 결과는 FK와 같은 자리에 놓여야 한다.
+ik_worst = 0.0
+ik_lowest = None
+for frame in range(scene.frame_start, scene.frame_end + 1):
+    scene.frame_set(frame)
+    bpy.context.view_layer.update()
+    for _slot, source_bone, target_bone in pairs:
+        gap = direction(source, source_bone).angle(direction(target, target_bone), 0.0)
+        ik_worst = max(ik_worst, math.degrees(gap))
+    for name in foot_bones:
+        matrix = target.matrix_world @ target.pose.bones[name].matrix
+        for point in (matrix.translation, matrix @ Vector((0.0, target.pose.bones[name].bone.length, 0.0))):
+            ik_lowest = point.z if ik_lowest is None else min(ik_lowest, point.z)
+assert ik_worst < 0.5, f"IK 전환이 FK와 어긋났습니다: 최대 {ik_worst:.3f}°"
+assert ik_lowest >= rest_floor - 1e-3, f"IK 전환에서 발이 바닥을 파고들었습니다: {ik_lowest:.4f}"
+for token in ("IK로 전환", "목표 위치 오차", "중간 관절 오차", "폴 각도 실측 보정"):
+    assert token in settings.apply_report, token
+
+# IK 컨스트레인트가 없는 리그에서는 조용히 FK로 돌아가야 한다.
+# 컨스트레인트는 아마추어 데이터가 아니라 오브젝트의 포즈 본에 붙으므로,
+# 데이터를 복사해 만든 새 오브젝트에는 IK가 없다.
+plain = bpy.data.objects.new("CatAni_검사_IK없음", target.data.copy())
+scene.collection.objects.link(plain)
+bpy.context.view_layer.update()
+assert not any(c.type == "IK" for bone in plain.pose.bones for c in bone.constraints)
+assert not retarget.ik_setups(plain), "IK가 없는 리그에서 구성이 잡혔습니다"
+settings.target_armature = plain
+assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
+assert "쓸 수 있는 IK 컨스트레인트가 없어" in settings.apply_report, settings.apply_report
+settings.target_armature = target
+
 addon.unregister()
 addon.register()
 temporary.cleanup()
 print(f"CATANI_PASS 합성 CMU BVH 22부위 리타게팅·최대 방향 오차 {worst:.4f}°·접지·NLA/IK 차단·재적용·실패 경로·"
-      f"간소화 키 {simplified_keys}/{dense_keys}개 방향 오차 {worst_simplified:.4f}°")
+      f"간소화 키 {simplified_keys}/{dense_keys}개 방향 오차 {worst_simplified:.4f}°·"
+      f"IK 전환 {len(setups)}체인 방향 오차 {ik_worst:.4f}°")
