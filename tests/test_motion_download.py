@@ -2,6 +2,8 @@
 
 from dataclasses import replace
 import hashlib
+import io
+import zipfile
 import importlib
 import json
 from pathlib import Path
@@ -66,6 +68,72 @@ class MotionDownloadTests(unittest.TestCase):
                 self.assertFalse(Path(entry.local_path).is_absolute())
                 self.assertNotIn("..", Path(entry.local_path).parts)
                 self.assertEqual(catalog.get_source(entry.id), entry)
+
+    def _archive(self, members):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        return buffer.getvalue()
+
+    def _archive_pair(self):
+        """같은 ZIP에서 나오는 두 항목과 그 ZIP 바이트."""
+        first, second = BVH_BYTES, BVH_BYTES + b"0 0 0 9 0 0\n"
+        payload = self._archive({
+            "A_Walk.bvh": first, "A_Run.bvh": second,
+            "../escape.bvh": BVH_BYTES, "notes.txt": b"skip me",
+        })
+        url = "https://accad.osu.edu/sites/accad.osu.edu/files/T_bvh.zip"
+        left = replace(catalog.CATALOG[0], id="t_walk", name="검사 걷기", local_path="ACCAD/A_Walk.bvh",
+                       download_url=url, archive_member="A_Walk.bvh", blob_sha1="",
+                       size_bytes=len(first), sha256=hashlib.sha256(first).hexdigest(),
+                       archive_sha256=hashlib.sha256(payload).hexdigest(), archive_size_bytes=len(payload))
+        right = replace(left, id="t_run", name="검사 달리기", local_path="ACCAD/A_Run.bvh",
+                        archive_member="A_Run.bvh", size_bytes=len(second),
+                        sha256=hashlib.sha256(second).hexdigest())
+        return payload, left, right
+
+    def test_archive_download_extracts_every_member_once(self):
+        """ZIP 배포본은 한 번 받아 안의 BVH를 모두 풀고 등록해야 한다."""
+        payload, left, right = self._archive_pair()
+        with patch.object(downloader, "entries_in_archive", lambda url: (left, right)), \
+             patch.object(downloader, "urlopen", lambda request, timeout=None: (
+                 self.requests.append(request.full_url), MemoryResponse(payload))[1]):
+            path = downloader.download_asset(left, self.directory)
+        self.assertEqual(path, (self.directory / "ACCAD/A_Walk.bvh").resolve())
+        self.assertTrue((self.directory / "ACCAD/A_Run.bvh").is_file(), "같은 묶음의 다른 항목이 풀리지 않았습니다")
+        self.assertEqual(self.requests, [left.download_url], "묶음을 한 번만 받아야 합니다")
+        # 압축 밖으로 나가는 경로와 BVH가 아닌 멤버는 무시한다.
+        self.assertFalse((self.directory.parent / "escape.bvh").exists())
+        self.assertFalse((self.directory / "escape.bvh").exists())
+        self.assertFalse((self.directory / "ACCAD/notes.txt").exists())
+        manifest = library.read_manifest(self.directory)
+        self.assertEqual(sorted(manifest), ["ACCAD/A_Run.bvh", "ACCAD/A_Walk.bvh"])
+        self.assertEqual(manifest["ACCAD/A_Run.bvh"]["name"], "검사 달리기")
+        # 이미 풀린 항목은 네트워크를 다시 쓰지 않는다.
+        self.requests.clear()
+        with patch.object(downloader, "entries_in_archive", lambda url: (left, right)):
+            again = downloader.download_asset(right, self.directory)
+        self.assertEqual(again, (self.directory / "ACCAD/A_Run.bvh").resolve())
+        self.assertEqual(self.requests, [])
+
+    def test_archive_with_wrong_checksum_installs_nothing(self):
+        payload, left, right = self._archive_pair()
+        broken = replace(left, archive_sha256="0" * 64)
+        with patch.object(downloader, "entries_in_archive", lambda url: (broken, right)), \
+             patch.object(downloader, "urlopen", lambda request, timeout=None: MemoryResponse(payload)):
+            with self.assertRaises(ValueError):
+                downloader.download_asset(broken, self.directory)
+        self.assertFalse((self.directory / "ACCAD").exists(), "검증 실패인데 파일이 남았습니다")
+        self.assertEqual(library.read_manifest(self.directory), {})
+
+    def test_archive_member_content_mismatch_is_refused(self):
+        payload, left, right = self._archive_pair()
+        lying = replace(right, sha256=hashlib.sha256(b"different").hexdigest())
+        with patch.object(downloader, "entries_in_archive", lambda url: (left, lying)), \
+             patch.object(downloader, "urlopen", lambda request, timeout=None: MemoryResponse(payload)):
+            with self.assertRaises(ValueError):
+                downloader.download_asset(left, self.directory)
 
     def test_download_creates_verified_file_and_searchable_index(self):
         result = downloader.download_asset(self.entry, self.directory, opener=self.opener)

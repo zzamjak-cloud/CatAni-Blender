@@ -11,7 +11,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 CATALOG_FILE = "motion_catalog.json"
-ALLOWED_HOSTS = frozenset({"raw.githubusercontent.com"})
+# 다운로드를 허용하는 호스트. 카탈로그가 고정 리비전과 체크섬을 함께 담는 곳만 넣는다.
+ALLOWED_HOSTS = frozenset({"raw.githubusercontent.com", "accad.osu.edu"})
 MAX_FILE_BYTES = 32 * 1024 * 1024
 
 
@@ -35,6 +36,10 @@ class SourceEntry:
     fps: float = 0.0
     rig_profile: str = ""
     commercial_use: bool = True
+    # ZIP으로만 배포되는 출처. download_url이 압축 파일을 가리키고 archive_member가 그 안의 BVH다.
+    archive_member: str = ""
+    archive_sha256: str = ""
+    archive_size_bytes: int = 0
 
 
 def _text(mapping, key, default=""):
@@ -74,7 +79,22 @@ def load_catalog(path=None):
         relative = Path(local_path)
         if not local_path or relative.is_absolute() or ".." in relative.parts or relative.suffix.lower() != ".bvh":
             raise ValueError(f"모션 {identifier}의 저장 경로가 올바르지 않습니다.")
-        download_url = _text(source, "base_url") + remote_path
+        archive = _text(item, "archive")
+        archive_member = ""
+        archive_digest = ""
+        archive_size = 0
+        if archive:
+            member = Path(remote_path)
+            if member.is_absolute() or ".." in member.parts or member.suffix.lower() != ".bvh":
+                raise ValueError(f"모션 {identifier}의 압축 내부 경로가 올바르지 않습니다.")
+            archive_member = remote_path
+            archive_digest = _text(item, "archive_sha256")
+            archive_size = item.get("archive_size_bytes")
+            if len(archive_digest) != 64:
+                raise ValueError(f"모션 {identifier}의 압축 파일 체크섬이 없습니다.")
+            if not isinstance(archive_size, int) or not 0 < archive_size <= MAX_FILE_BYTES:
+                raise ValueError(f"모션 {identifier}의 압축 파일 크기가 지원 범위를 벗어났습니다.")
+        download_url = _text(source, "base_url") + (archive or remote_path)
         parsed = urlparse(download_url)
         if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
             raise ValueError(f"모션 {identifier}의 다운로드 주소를 신뢰할 수 없습니다.")
@@ -94,6 +114,8 @@ def load_catalog(path=None):
             category=_text(item, "category"), frames=int(item.get("frames") or 0),
             fps=float(item.get("fps") or 0.0), rig_profile=_text(source, "rig_profile"),
             commercial_use=bool(source.get("commercial_use", True)),
+            archive_member=archive_member, archive_sha256=archive_digest,
+            archive_size_bytes=archive_size,
         ))
     if not entries:
         raise ValueError("모션 카탈로그가 비어 있습니다.")
@@ -110,6 +132,11 @@ def load_categories(path=None):
 CATALOG = load_catalog()
 CATEGORIES = load_categories()
 _BY_ID = {entry.id: entry for entry in CATALOG}
+
+
+def entries_in_archive(download_url):
+    """같은 압축 파일에서 나오는 모든 항목. 한 번 받으면 전부 풀어 등록한다."""
+    return tuple(entry for entry in CATALOG if entry.archive_member and entry.download_url == download_url)
 
 
 def get_source(identifier):

@@ -9,8 +9,10 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import io
 import re
 import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from urllib.request import Request, urlopen
 
@@ -88,6 +90,24 @@ BANDAI_STYLE = {
 
 # 큐레이션된 단일 동작이라 CMU보다 짧다. 하한을 따로 둔다.
 BANDAI_MIN_BYTES = 20_000
+
+ACCAD_BASE = "https://accad.osu.edu/sites/accad.osu.edu/files/"
+# 개별 파일 주소가 없어 ZIP 배포본에서 멤버 목록과 체크섬을 직접 읽는다.
+ACCAD_ARCHIVES = ("Female1_bvh.zip", "Male1_bvh.zip", "Male2_bvh.zip")
+
+ACCAD_SOURCE = {
+    "name": "ACCAD Open Motion Project",
+    "source_name": "ACCAD · The Ohio State University",
+    "source_url": "https://accad.osu.edu/research/motion-lab/mocap-system-and-data",
+    "license_note": "Creative Commons Attribution 3.0 Unported. 출처를 표기하면 상업 제품에도 쓸 수 있습니다.",
+    "license_url": "https://creativecommons.org/licenses/by/3.0/",
+    "commercial_use": True,
+    "revision": "open-motion-project",
+    "base_url": ACCAD_BASE,
+    "rig_profile": "",
+}
+
+ACCAD_MIN_BYTES = 20_000
 
 # 크기가 너무 작으면 쓸 만한 동작이 없고, 너무 크면 다운로드와 굽기가 무거워진다.
 # 상한은 source_catalog.MAX_FILE_BYTES(32MB) 안에 둔다.
@@ -187,6 +207,27 @@ def request_text(url):
     request = Request(url, headers={"User-Agent": "CatAni-Catalog-Builder", "Accept": "text/plain"})
     with urlopen(request, timeout=90) as response:
         return response.read().decode("utf-8", "replace")
+
+
+def request_bytes(url):
+    """압축 배포본 전체를 받는다. 카탈로그를 만들 때만 쓰므로 상한만 지킨다."""
+    request = Request(url, headers={"User-Agent": "CatAni-Catalog-Builder", "Accept": "*/*"})
+    with urlopen(request, timeout=180) as response:
+        payload = response.read(64 * 1024 * 1024 + 1)
+    if len(payload) > 64 * 1024 * 1024:
+        raise ValueError(f"압축 배포본이 너무 큽니다: {url}")
+    return payload
+
+
+def _bvh_header(payload):
+    """받아 둔 바이트에서 (프레임 수, FPS)를 읽는다."""
+    text = payload[:262144].decode("utf-8", "replace")
+    frames = re.search(r"^\s*Frames:\s*(\d+)", text, re.MULTILINE)
+    interval = re.search(r"^\s*Frame Time:\s*([0-9.eE+-]+)", text, re.MULTILINE)
+    if not frames or not interval:
+        return 0, 0.0
+    step = float(interval.group(1))
+    return int(frames.group(1)), (1.0 / step if step > 0 else 0.0)
 
 
 def request_head(url, length):
@@ -357,18 +398,72 @@ def collect_bandai(verbose=True):
     return motions
 
 
+def collect_accad(verbose=True):
+    """ACCAD 배포 ZIP을 받아 안의 BVH를 카탈로그 항목으로 만든다.
+
+    개별 파일 주소가 없으므로 압축 파일 하나를 받아 전부 푸는 방식으로 등록한다.
+    항목마다 압축 파일의 SHA-256과 멤버의 SHA-256을 함께 적어 둔다.
+    """
+    motions = []
+    for archive_name in ACCAD_ARCHIVES:
+        payload = request_bytes(ACCAD_BASE + archive_name)
+        archive_digest = hashlib.sha256(payload).hexdigest()
+        subject = archive_name.split("_")[0]
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            for info in sorted(archive.infolist(), key=lambda item: item.filename):
+                name = Path(info.filename)
+                if info.is_dir() or name.is_absolute() or ".." in name.parts or name.suffix.lower() != ".bvh":
+                    continue
+                if not ACCAD_MIN_BYTES <= info.file_size <= MAX_BYTES:
+                    continue
+                data = archive.read(info)
+                frames, fps = _bvh_header(data)
+                # `Female1_C21_S2_RunToPickUpBox` 처럼 마지막 토큰만 동작 설명이다.
+                tail = name.stem.split("_")[-1]
+                description = normalize_description(tail)
+                matched = classify(description) or ("misc", "기타", ("기타", "misc"))
+                category, korean, tags = matched
+                seconds = frames / fps if frames and fps else 0.0
+                detail = f"ACCAD {subject} · {description} · CC BY 3.0"
+                if seconds:
+                    detail += f" · {frames}프레임 / 약 {seconds:.1f}초"
+                motions.append({
+                    "id": f"accad_{name.stem}",
+                    "source": "accad",
+                    "category": category,
+                    "name": f"{korean} · {description}"[:44],
+                    "tags": sorted({*tags, subject.lower(), "accad",
+                                    *re.split(r"[^a-z]+", description.lower())} - {""}, key=str),
+                    "description": detail,
+                    "remote_path": info.filename,
+                    "local_path": f"ACCAD/{name.name}",
+                    "size_bytes": info.file_size,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "blob_sha1": "",
+                    "archive": archive_name,
+                    "archive_sha256": archive_digest,
+                    "archive_size_bytes": len(payload),
+                    "frames": frames,
+                    "fps": round(fps, 4),
+                })
+                if verbose:
+                    print(f"  {motions[-1]['id']:44s} {motions[-1]['name']}", file=sys.stderr)
+    return motions
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default=str(OUTPUT))
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
-    motions = collect(verbose=not args.quiet) + collect_bandai(verbose=not args.quiet)
+    motions = (collect(verbose=not args.quiet) + collect_bandai(verbose=not args.quiet)
+               + collect_accad(verbose=not args.quiet))
     if len({item["id"] for item in motions}) != len(motions):
         raise ValueError("카탈로그 ID가 중복되었습니다.")
     document = {
         "schema_version": 1,
         "generated_by": "scripts/build_catalog.py",
-        "sources": {"cmu": CMU_SOURCE, "bandai": BANDAI_SOURCE},
+        "sources": {"cmu": CMU_SOURCE, "bandai": BANDAI_SOURCE, "accad": ACCAD_SOURCE},
         # `bow`는 Bandai Namco 쪽에만 있는 분류라 CMU 분류표 뒤에 붙인다.
         "categories": {**{key: korean for key, korean, *_ in (*CATEGORIES, UNKNOWN)}, "bow": "절·인사"},
         "motions": motions,

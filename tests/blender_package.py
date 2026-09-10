@@ -33,8 +33,14 @@ local = [item for item in settings.motions if item.available]
 assert local, "설치본이 동봉 예제 모션을 찾지 못했습니다"
 assert len(local) == 1 and local[0].path == str(bundled / "demo" / "friendly_wave.bvh"), [item.path for item in local]
 settings.motion_query = ""
+# 기본 목록은 비상업 출처를 뺀다. 설치본이 카탈로그 전체를 담았는지 보려면 토글을 켠다.
+settings.include_noncommercial = True
 assert bpy.ops.catani.motion_refresh() == {"FINISHED"}
 assert len(settings.motions) == len(addon.source_catalog.CATALOG) + 1, len(settings.motions)
+settings.include_noncommercial = False
+assert bpy.ops.catani.motion_refresh() == {"FINISHED"}
+free = sum(1 for entry in addon.source_catalog.CATALOG if entry.commercial_use)
+assert len(settings.motions) == free + 1, (len(settings.motions), free)
 settings.motion_active = next(index for index, item in enumerate(settings.motions) if item.available)
 before = set(bpy.data.objects)
 assert bpy.ops.catani.motion_import() == {"FINISHED"}, settings.motion_status

@@ -1,15 +1,20 @@
 """공개 BVH를 검증하여 내려받고 로컬 인덱스에 출처를 기록한다."""
 
 import hashlib
+import io
 import os
 from pathlib import Path
 import tempfile
 import threading
+import zipfile
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .motion_library import read_manifest, update_manifest
-from .source_catalog import ALLOWED_HOSTS, MAX_FILE_BYTES
+from .source_catalog import ALLOWED_HOSTS, MAX_FILE_BYTES, entries_in_archive
+
+# 압축 폭탄 방어. ACCAD 배포본은 풀어도 40MB를 넘지 않는다.
+MAX_ARCHIVE_EXPANDED_BYTES = 256 * 1024 * 1024
 
 
 class DownloadCancelled(Exception):
@@ -54,6 +59,101 @@ def _write_metadata(entry, root):
     })
 
 
+def _fetch(url, limit, *, progress=None, cancel_event=None, opener=None, label=""):
+    """검증 전 바이트를 메모리에 모아 돌려준다. 상한을 넘으면 즉시 중단한다."""
+    request = Request(url, headers={"User-Agent": "CatAni-Motion-Library", "Accept": "*/*"})
+    chunks = []
+    size = 0
+    with (opener or urlopen)(request, timeout=20) as response:
+        while True:
+            _check_cancel(cancel_event)
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                raise ValueError("다운로드 크기가 카탈로그 정보와 다릅니다.")
+            chunks.append(chunk)
+            if progress:
+                progress(size / limit, f"{label} · {size / 1024:.0f} / {limit / 1024:.0f} KB")
+    return b"".join(chunks)
+
+
+def _safe_members(archive):
+    """압축 안에서 꺼내도 되는 BVH 멤버만 고른다."""
+    members = []
+    expanded = 0
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        name = Path(info.filename)
+        if name.is_absolute() or ".." in name.parts or name.suffix.lower() != ".bvh":
+            continue
+        expanded += info.file_size
+        if expanded > MAX_ARCHIVE_EXPANDED_BYTES:
+            raise ValueError("압축을 풀었을 때 크기가 지원 범위를 벗어납니다.")
+        members.append(info)
+    if not members:
+        raise ValueError("압축 파일에 BVH가 없습니다.")
+    return members
+
+
+def _install_archive(entry, root, *, progress=None, cancel_event=None, opener=None):
+    """압축 배포본을 한 번 받아 BVH를 모두 풀고, 요청한 항목의 경로를 돌려준다."""
+    target = (root / Path(entry.local_path)).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("다운로드 대상은 선택한 모션 폴더 내부여야 합니다.")
+    if target.is_file():
+        try:
+            verify_payload(entry, target.read_bytes())
+        except ValueError:
+            raise ValueError(f"다른 내용의 기존 파일을 보호하기 위해 중단했습니다: {target.name}") from None
+        _write_metadata(entry, root)
+        if progress:
+            progress(1.0, "이미 받은 모션을 인덱스에 등록했습니다.")
+        return target
+    payload = _fetch(entry.download_url, entry.archive_size_bytes, progress=progress,
+                     cancel_event=cancel_event, opener=opener, label=f"{entry.name} 묶음")
+    if len(payload) != entry.archive_size_bytes:
+        raise ValueError("다운로드 크기가 카탈로그 정보와 다릅니다.")
+    if hashlib.sha256(payload).hexdigest() != entry.archive_sha256:
+        raise ValueError("압축 파일 SHA-256 검증에 실패했습니다. 파일을 다시 받아 주세요.")
+    _check_cancel(cancel_event)
+    # 같은 압축에서 나오는 항목을 한 번에 등록한다. 멤버 하나마다 다시 받지 않는다.
+    known = {other.archive_member: other for other in entries_in_archive(entry.download_url)}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    installed = []
+    with tempfile.TemporaryDirectory(prefix=".catani-archive-", dir=root) as staging:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            for info in _safe_members(archive):
+                _check_cancel(cancel_event)
+                data = archive.read(info)
+                other = known.get(info.filename)
+                if other is not None:
+                    if len(data) != other.size_bytes or (other.sha256 and hashlib.sha256(data).hexdigest() != other.sha256):
+                        raise ValueError(f"압축 안의 {info.filename} 내용이 카탈로그 정보와 다릅니다.")
+                    destination = root / Path(other.local_path)
+                else:
+                    destination = target.parent / Path(info.filename).name
+                staged = Path(staging) / Path(info.filename).name
+                staged.write_bytes(data)
+                if not destination.exists():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(staged, destination)
+                    installed.append((other, destination))
+                else:
+                    staged.unlink(missing_ok=True)
+    for other, _destination in installed:
+        if other is not None:
+            _write_metadata(other, root)
+    if not target.is_file():
+        raise ValueError("압축 파일에서 요청한 모션을 찾지 못했습니다.")
+    _write_metadata(entry, root)
+    if progress:
+        progress(1.0, f"{entry.name} · 묶음에서 {len(installed)}개를 풀어 등록했습니다.")
+    return target
+
+
 def download_asset(entry, library_dir, *, progress=None, cancel_event=None, opener=None):
     """완료된 BVH 경로를 반환한다. 기존 다른 파일은 덮어쓰지 않는다."""
     root = Path(library_dir).expanduser().resolve()
@@ -73,6 +173,8 @@ def download_asset(entry, library_dir, *, progress=None, cancel_event=None, open
     _check_cancel(cancel_event)
     root.mkdir(parents=True, exist_ok=True)
     read_manifest(root)
+    if entry.archive_member:
+        return _install_archive(entry, root, progress=progress, cancel_event=cancel_event, opener=opener)
     if target.exists():
         if not target.is_file():
             raise ValueError(f"다른 내용의 기존 파일을 보호하기 위해 중단했습니다: {target.name}")
