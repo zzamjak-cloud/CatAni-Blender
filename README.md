@@ -198,29 +198,23 @@ scripts\dev_run.bat --background --python-expr "import bpy; print(bpy.app.versio
 
 ### Graph Editor에서 동작 수정
 
-0.1.1부터 매 프레임 키를 생성하지 않습니다. 주요 포즈와 반복 동작의 전환점에만 키를 만들고, Bézier 곡선과 좌우 핸들로 중간 움직임을 연결합니다. 각 본의 움직임은 축-각도 회전의 **각도 채널 하나**(`rotation_axis_angle[0]`)로 편집합니다. 축 좌표의 고정 채널은 실수로 바꾸지 않도록 잠겨 있습니다.
+매 프레임 키를 만들지 않습니다. 굽는 단계에서 회전 곡선을 3차 베지어 최소제곱으로 적합하므로, 실제 CMU 걷기에서 키가 42,319 → 3,897개(91% 감소)로 남습니다.
 
-보조 절차 동작 결과 캐릭터를 선택하고 Graph Editor에서 수정할 본의 곡선을 선택하세요. 키를 좌우로 이동하면 타이밍, 위아래로 이동하면 회전량, 핸들을 조절하면 가감속을 변경할 수 있습니다. 양쪽 핸들이 독립적인 FREE 방식이므로 자세 진입과 이탈의 속도를 각각 조절할 수 있습니다. 각도 곡선의 축-각도 회전 모드는 유지하세요.
-
-3초·60FPS·오른손 손 흔들기 2회 기준으로 전체 키는 63개입니다. 움직이는 각도 키는 44개이고, 나머지는 회전축 고정 15개와 IK 비활성화 4개입니다. 같은 조건의 대기는 전체 28개 키입니다. FPS에 따라 키 수가 늘어나지 않으며, 반복 횟수를 늘릴 때만 필요한 전환점이 추가됩니다.
-
-기존 샘플러와 실제 Blender 평가 포즈를 259개 시점에서 비교했습니다. 위 인사 예제의 최대 회전 차이는 약 0.153°, 본 위치 차이는 0.000778 Blender 단위입니다. 반복 8회·최대 강도를 포함한 검사에서는 최대 회전 차이가 0.186° 미만이었습니다. 새 생성 결과부터 적용되며 이전에 확정한 Action의 키를 자동 삭제하지 않습니다.
+적용한 캐릭터를 선택하고 Graph Editor에서 수정할 본의 `rotation_quaternion` 곡선을 고르세요. 키를 좌우로 옮기면 타이밍, 위아래로 옮기면 회전량, 핸들을 조절하면 가감속이 바뀝니다. 양쪽 핸들이 독립적인 FREE 방식이므로 자세 진입과 이탈의 속도를 각각 조절할 수 있습니다. 핸들 x는 구간의 1/3 지점에 고정되어 있어 Blender의 평가가 적합 계산과 정확히 일치합니다. 굽기 오차는 상세 설정의 **곡선 간소화 오차**로 조절합니다.
 
 저장소 루트에서 격리 프로필을 통해 핵심 기능과 재등록 검사를 실행합니다. Python 예외는 종료 코드 1로 전달됩니다.
 
 ```bash
-bash scripts/dev_run.sh --background --python tests/blender_smoke.py
-bash scripts/dev_run.sh --background --python tests/blender_reload.py
-bash scripts/dev_run.sh --background --python tests/blender_operators.py
-bash scripts/dev_run.sh --background --python tests/blender_curves.py
 bash scripts/dev_run.sh --background --python tests/blender_ui_contract.py
 bash scripts/dev_run.sh --background --python tests/blender_motion_library.py
 bash scripts/dev_run.sh --background --python tests/blender_retarget.py
+bash scripts/dev_run.sh --background --python tests/blender_reload.py
 bash scripts/dev_run.sh --background --python tests/blender_rig_variants.py
 bash scripts/dev_run.sh --background --python tests/render_preview.py
 bash scripts/dev_run.sh --python tests/gui_preview.py
 python3 tests/test_motion_library.py
 python3 tests/test_motion_download.py
+python3 tests/test_motion_preview.py
 ```
 
 기본 회귀 검사는 네트워크를 사용하지 않습니다. 실제 CMU 다운로드 검사는 명시적으로 허용할 때만 실행합니다.
@@ -231,7 +225,7 @@ python3 tests/motion_download_live.py --allow-network
 
 Windows에서는 같은 인자를 `scripts\dev_run.bat` 또는 `scripts\dev_run.ps1`에 전달합니다.
 
-macOS Blender 5.2.0에서 통합 목록·즉시 검색, 다운로드 후 자동 적용, 22부위 리타게팅, 리그 규격 7종 인식, 주 패널 단순화 계약, ZIP만의 독립 런타임, 보조 절차 동작, 저장 시 미리보기 취소, 등록 해제·재등록을 확인했습니다. Windows는 실행기 정적 검사만 수행했습니다.
+macOS Blender 5.2.0에서 통합 목록·즉시 검색, 다운로드 후 자동 적용, 22부위 리타게팅, 리그 규격 7종 인식, 주 패널 단순화 계약, ZIP만의 독립 런타임, 등록 해제·재등록을 확인했습니다. Windows는 실행기 정적 검사만 수행했습니다.
 
 `blender_retarget.py`는 22개 관절을 가진 합성 CMU 규격 BVH를 실제로 가져와 캐릭터에 굽고, 모든 프레임에서 본 방향 오차가 0.5° 미만인지, 발이 바닥을 파고들지 않는지, 접지 보정을 끄면 첫 프레임 엉덩이가 레스트와 정확히 같은지, NLA와 IK가 결과를 덮지 않는지, 프레임 간격이 키 수에 반영되는지, 본 이름이 맞지 않는 리그가 거부되는지를 검사합니다. 곡선 간소화를 켠 경로도 따로 검사합니다: 키가 1/4 이하로 줄고, 모든 키가 자유 핸들 베지어이고, 핸들 x가 구간의 1/3 지점이고, 한 부위의 쿼터니언 4채널 키 위치가 일치하고, 모든 프레임의 방향 오차가 3° 미만이며 발이 바닥 아래로 내려가지 않는지 확인합니다. IK 전환도 따로 검사합니다: 컨스트레인트에서 4개 체인을 읽는지, 컨트롤·폴 본에 이동 곡선이 생기는지, IK가 직접 푸는 체인 본에는 FK 회전 키가 남지 않는지, IK 영향이 1로 되돌아가는지, 간소화를 끈 결과가 FK와 0.5° 안에서 일치하는지, IK가 없는 리그에서는 조용히 FK로 돌아가는지 확인합니다.
 
@@ -239,7 +233,7 @@ macOS Blender 5.2.0에서 통합 목록·즉시 검색, 다운로드 후 자동 
 
 실제 CMU 데이터로는 걷기·달리기·점프·대기·앉기·춤·발차기·펀치·오르기·기기·손 인사·운반·던지기·계단·뒷걸음·방향 전환 **16개 동작 분류**를 내려받아 적용했습니다. 전부 22/22 부위 매핑, 방향 오차 0.000°, 실패 0건입니다. 그 과정에서 프레임 간격을 넓혔을 때 검증이 보간 오차를 놓치던 문제와 발 바닥 관통을 찾아 고쳤습니다. 손이 바닥을 짚는 곡예 동작(재주넘기 발차기)은 팔다리 비율 차이로 관통이 남으며, 리포트에 깊이와 본 이름으로 보고합니다.
 
-`artifacts/CatAni_Wave_Demo.blend`는 보조 절차 동작 검사에서 생성하는 예제입니다. `render_preview.py`는 정면·측면 이미지를 만들며, `gui_preview.py`는 기본 화면 구성에서 결과를 재생한 후 검증용 Blender를 자동 종료합니다. 원본 샘플 파일에는 저장하지 않습니다.
+`artifacts/CatAni_Motion_Demo.blend`는 `blender_retarget.py`가 굽기 결과와 검증 포즈를 함께 저장한 예제입니다. `blender_reload.py`는 이 파일을 다른 프로세스에서 열어 포즈가 그대로 재현되는지 확인합니다. `render_preview.py`는 정면·측면 이미지를 만들며, `gui_preview.py`는 기본 화면 구성에서 결과를 재생한 후 검증용 Blender를 자동 종료합니다. 원본 샘플 파일에는 저장하지 않습니다.
 
 초기 GUI 검증에서 콘솔로 비활성 VIEW_3D 공간의 `show_region_ui`를 변경하면 Blender 5.2 네이티브 충돌이 발생했습니다. 애드온은 해당 호출을 사용하지 않으며, GUI 검사는 타이머에서 활성 영역만 설정하도록 구성했습니다.
 

@@ -8,8 +8,7 @@ import bpy
 import bpy.utils.previews
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 
-from . import engine, motion_preview, retarget
-from .core import MotionSpec
+from . import motion_preview, retarget
 from .motion_downloader import DownloadJob
 from .motion_import import import_asset
 from .motion_library import MotionAsset, browse, bundled_library_path, normalize_tags
@@ -405,11 +404,6 @@ class CatAniSettings(bpy.types.PropertyGroup):
     hide_source: BoolProperty(name="모션 원본 리그 숨기기", default=True)
     download_status: StringProperty(name="다운로드", default="")
     download_progress: FloatProperty(name="진행", min=0.0, max=1.0, subtype="FACTOR")
-    recipe: EnumProperty(name="보조 동작", items=[("idle", "대기 / 호흡", "Player 샘플의 절차 동작"), ("wave", "단순 손 흔들기", "비교용 FK 동작")], default="idle")
-    side: EnumProperty(name="손", items=[("R", "오른손", "캐릭터 오른손"), ("L", "왼손", "캐릭터 왼손")], default="R")
-    duration: FloatProperty(name="전체 길이(초)", default=2.0, min=0.5, max=10.0)
-    intensity: FloatProperty(name="동작 강도", default=0.7, min=0.1, max=1.0)
-    repeat: IntProperty(name="구간 내 반복", default=2, min=1, max=8)
 
 
 class CATANI_UL_motions(bpy.types.UIList):
@@ -439,7 +433,7 @@ class CATANI_OT_motion_apply(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _job is None and engine.get_session() is None
+        return _job is None
 
     def execute(self, context):
         settings = context.scene.catani_settings
@@ -529,7 +523,7 @@ class CATANI_OT_motion_import(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _job is None and engine.get_session() is None
+        return _job is None
 
     def execute(self, context):
         settings = context.scene.catani_settings
@@ -557,7 +551,7 @@ class CATANI_OT_motion_preview(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _job is None and engine.get_session() is None
+        return _job is None
 
     def execute(self, context):
         settings = context.scene.catani_settings
@@ -658,7 +652,7 @@ class CATANI_OT_motion_browser(bpy.types.Operator):
 
     def execute(self, context):
         if not CATANI_OT_motion_apply.poll(context):
-            self.report({"WARNING"}, "다운로드나 절차 동작 미리보기가 끝난 뒤 적용하세요.")
+            self.report({"WARNING"}, "다운로드가 끝난 뒤 적용하세요.")
             return {"CANCELLED"}
         return bpy.ops.catani.motion_apply("EXEC_DEFAULT")
 
@@ -832,62 +826,6 @@ class CATANI_OT_settings(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CATANI_OT_inspect(bpy.types.Operator):
-    bl_idname = "catani.inspect_rig"
-    bl_label = "선택 리그 검사"
-
-    def execute(self, context):
-        errors = engine.inspect_rig(context.active_object)
-        self.report({"ERROR"} if errors else {"INFO"}, " / ".join(errors) if errors else "Player v1 보조 동작을 사용할 수 있습니다.")
-        return {"CANCELLED"} if errors else {"FINISHED"}
-
-
-class CATANI_OT_preview(bpy.types.Operator):
-    bl_idname = "catani.preview"
-    bl_label = "보조 동작 미리보기"
-
-    @classmethod
-    def poll(cls, context):
-        return engine.get_session() is None and context.mode == "OBJECT" and context.active_object is not None and context.active_object.type == "ARMATURE"
-
-    def execute(self, context):
-        settings = context.scene.catani_settings
-        try:
-            spec = MotionSpec(recipe=settings.recipe, side=settings.side, duration=settings.duration, intensity=settings.intensity, repeat=settings.repeat, fps=context.scene.render.fps / context.scene.render.fps_base)
-            engine.begin_preview(context, context.active_object, spec)
-        except Exception as error:
-            self.report({"ERROR"}, str(error))
-            return {"CANCELLED"}
-        return {"FINISHED"}
-
-
-class CATANI_OT_confirm(bpy.types.Operator):
-    bl_idname = "catani.confirm"
-    bl_label = "복사본으로 확정"
-
-    @classmethod
-    def poll(cls, context):
-        return engine.get_session() is not None and context.mode == "OBJECT"
-
-    def execute(self, context):
-        action = engine.confirm_preview(context)
-        self.report({"INFO"}, f"{action.name} 확정. 원본은 Outliner에서 다시 표시할 수 있습니다.")
-        return {"FINISHED"}
-
-
-class CATANI_OT_cancel(bpy.types.Operator):
-    bl_idname = "catani.cancel"
-    bl_label = "미리보기 취소"
-
-    @classmethod
-    def poll(cls, context):
-        return engine.get_session() is not None and context.mode == "OBJECT"
-
-    def execute(self, context):
-        engine.cancel_preview(context)
-        return {"FINISHED"}
-
-
 class CATANI_PT_main(bpy.types.Panel):
     bl_label = "CatAni · 모션"
     bl_idname = "CATANI_PT_main"
@@ -921,50 +859,18 @@ class CATANI_PT_main(bpy.types.Panel):
         row.operator("catani.settings", text="상세", icon="PREFERENCES")
 
 
-class CATANI_PT_procedural(bpy.types.Panel):
-    bl_label = "보조 · 절차 동작 비교"
-    bl_idname = "CATANI_PT_procedural"
-    bl_parent_id = "CATANI_PT_main"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "CatAni"
-    bl_options = {"DEFAULT_CLOSED"}
-
-    def draw(self, context):
-        layout = self.layout
-        settings = context.scene.catani_settings
-        layout.label(text="Player v1 샘플 리그 전용")
-        if engine.get_session():
-            layout.operator("catani.confirm", icon="CHECKMARK")
-            layout.operator("catani.cancel", icon="X")
-            layout.label(text="확정하면 원본은 숨김으로 유지")
-            return
-        layout.operator("catani.inspect_rig")
-        layout.prop(settings, "recipe")
-        if settings.recipe == "wave":
-            layout.prop(settings, "side", expand=True)
-        for name in ("duration", "intensity", "repeat"):
-            layout.prop(settings, name)
-        layout.operator("catani.preview", icon="PLAY")
-
-
 _classes = (
     CatAniMotionItem, CatAniSettings, CATANI_UL_motions,
     CATANI_OT_motion_refresh, CATANI_OT_motion_apply, CATANI_OT_motion_import,
     CATANI_OT_motion_preview, CATANI_OT_preview_clear, CATANI_OT_motion_browser,
     CATANI_OT_motion_download, CATANI_OT_download_cancel,
     CATANI_OT_motion_info, CATANI_OT_settings,
-    CATANI_OT_inspect, CATANI_OT_preview, CATANI_OT_confirm, CATANI_OT_cancel,
-    CATANI_PT_main, CATANI_PT_procedural,
+    CATANI_PT_main,
 )
 
 _handlers = (
     (bpy.app.handlers.load_pre, _stop_download),
-    (bpy.app.handlers.load_pre, engine.clear_before_load),
     (bpy.app.handlers.load_post, _refresh_after_load),
-    (bpy.app.handlers.save_pre, engine.cancel_before_save),
-    (bpy.app.handlers.undo_pre, engine.cancel_before_save),
-    (bpy.app.handlers.redo_pre, engine.cancel_before_save),
 )
 
 
@@ -991,7 +897,6 @@ def unregister():
         _previews = None
     if bpy.app.timers.is_registered(_refresh_all):
         bpy.app.timers.unregister(_refresh_all)
-    engine.cancel_preview(bpy.context)
     for handlers, callback in _handlers:
         if callback in handlers:
             handlers.remove(callback)

@@ -81,7 +81,7 @@ assert main["properties"] == ["target_armature"], main["properties"]
 assert "catani.motion_apply" in main["operators"], main["operators"]
 assert main["operators"].count("catani.motion_apply") == 1
 # 복잡한 정보와 설정은 주 패널에 없어야 한다.
-for hidden in ("motion_query", "motion_category", "local_only", "motion_library_path", "frame_step", "use_location", "hide_source", "recipe", "duration", "intensity", "repeat"):
+for hidden in ("motion_query", "motion_category", "local_only", "motion_library_path", "frame_step", "use_location", "hide_source"):
     assert hidden not in main["properties"], f"상세 설정이 주 패널에 노출되었습니다: {hidden}"
 for hidden in ("catani.motion_download", "catani.motion_import", "catani.motion_refresh", "wm.url_open"):
     assert hidden not in main["operators"], f"보조 동작이 주 패널에 노출되었습니다: {hidden}"
@@ -115,11 +115,6 @@ detail = record(addon.CATANI_OT_settings.draw, bpy.context)
 assert {"motion_library_path", "frame_step", "use_location", "hide_source"} <= set(detail["properties"]), detail["properties"]
 assert {"catani.motion_refresh", "catani.motion_download", "catani.motion_import"} <= set(detail["operators"]), detail["operators"]
 assert any("적용 리포트" in label for label in detail["labels"]), detail["labels"]
-
-# 절차 동작은 접힌 보조 패널에만 남는다.
-assert addon.CATANI_PT_procedural.bl_options == {"DEFAULT_CLOSED"}
-procedural = record(addon.CATANI_PT_procedural.draw, bpy.context)
-assert {"recipe", "duration", "intensity", "repeat"} <= set(procedural["properties"]), procedural["properties"]
 
 # 모션 샘플 팝업: 넓은 목록과 검색·필터, 미리보기 재생, 대상 지정이 한 창에 모인다.
 browser = record(addon.CATANI_OT_motion_browser.draw, bpy.context)

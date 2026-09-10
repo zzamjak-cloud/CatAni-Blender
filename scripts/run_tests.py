@@ -35,14 +35,11 @@ print("CATANI_TEST_PROFILE", profile)
 '''
 
 BLENDER_TESTS = (
-    ("blender_smoke.py", None),
-    ("blender_reload.py", "CatAni_Wave_Demo.blend"),
-    ("blender_curves.py", None),
     ("blender_ui_contract.py", None),
     ("blender_motion_library.py", None),
     ("blender_retarget.py", None),
+    ("blender_reload.py", "CatAni_Motion_Demo.blend"),
     ("blender_rig_variants.py", None),
-    ("blender_operators.py", None),
 )
 
 HOST_TESTS = ("test_motion_library.py", "test_motion_download.py", "test_motion_preview.py")

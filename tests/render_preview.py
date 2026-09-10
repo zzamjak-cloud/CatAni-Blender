@@ -6,7 +6,7 @@ import bpy
 from mathutils import Vector
 
 root = Path(__file__).resolve().parents[1]
-demo_name = os.environ.get("CATANI_DEMO_NAME", "CatAni_Wave_Demo.blend")
+demo_name = os.environ.get("CATANI_DEMO_NAME", "CatAni_Motion_Demo.blend")
 bpy.ops.wm.open_mainfile(filepath=str(root / "artifacts" / demo_name))
 scene = bpy.context.scene
 result = bpy.data.objects[json.loads(scene["catani_verification"])["rig"]]

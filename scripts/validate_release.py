@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
 import shutil
 import subprocess
 import tomllib
@@ -13,7 +12,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_FILES = (
-    "__init__.py", "core.py", "engine.py", "motion_library.py", "motion_import.py",
+    "__init__.py", "motion_library.py", "motion_import.py",
     "motion_preview.py", "source_catalog.py", "motion_downloader.py", "retarget.py", "motion_catalog.json",
     "blender_manifest.toml",
 )
@@ -27,9 +26,6 @@ def validate(root=ROOT, tag=None):
         raise ValueError("CatAni ID 또는 버전 형식이 잘못되었습니다.")
     if tag is not None and tag != f"v{version}":
         raise ValueError(f"태그 {tag}와 매니페스트 v{version}가 일치하지 않습니다.")
-    core = runpy.run_path(str(root / "catani/core.py"))
-    if json.loads(core["MotionSpec"]().to_json())["engine_version"] != version:
-        raise ValueError("MotionSpec 엔진 버전과 매니페스트가 다릅니다.")
     for name in RUNTIME_FILES:
         if not (root / "catani" / name).is_file():
             raise ValueError(f"필수 런타임 파일이 없습니다: {name}")

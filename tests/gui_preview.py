@@ -6,7 +6,7 @@ import bpy
 from mathutils import Quaternion, Vector
 
 root = Path(__file__).resolve().parents[1]
-bpy.ops.wm.open_mainfile(filepath=str(root / "artifacts" / os.environ.get("CATANI_DEMO_NAME", "CatAni_Wave_Demo.blend")), load_ui=False)
+bpy.ops.wm.open_mainfile(filepath=str(root / "artifacts" / os.environ.get("CATANI_DEMO_NAME", "CatAni_Motion_Demo.blend")), load_ui=False)
 state = {"frame": 1}
 
 

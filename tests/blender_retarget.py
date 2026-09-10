@@ -260,8 +260,24 @@ assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
 assert "쓸 수 있는 IK 컨스트레인트가 없어" in settings.apply_report, settings.apply_report
 settings.target_armature = target
 
+# 다른 프로세스에서 재현을 확인할 예제 파일. 굽힌 포즈를 함께 적어 둔다.
+assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
+baked = target.animation_data.action.frame_range
+demo_frames = [round(baked[0] + (baked[1] - baked[0]) * i / 4) for i in range(5)]
+poses = {}
+for frame in demo_frames:
+    scene.frame_set(frame)
+    bpy.context.view_layer.update()
+    poses[str(frame)] = {bone.name: [v for row in bone.matrix for v in row] for bone in target.pose.bones}
+scene["catani_verification"] = json.dumps({"rig": target.name, "poses": poses})
+artifacts = root / "artifacts"
+artifacts.mkdir(exist_ok=True)
+bpy.ops.wm.save_as_mainfile(filepath=str(artifacts / "CatAni_Motion_Demo.blend"))
+
 addon.unregister()
+assert not hasattr(bpy.types.Scene, "catani_settings")
 addon.register()
+assert hasattr(bpy.types.Scene, "catani_settings")
 temporary.cleanup()
 print(f"CATANI_PASS 합성 CMU BVH 22부위 리타게팅·최대 방향 오차 {worst:.4f}°·접지·NLA/IK 차단·재적용·실패 경로·"
       f"간소화 키 {simplified_keys}/{dense_keys}개 방향 오차 {worst_simplified:.4f}°·"

@@ -5,7 +5,7 @@ from pathlib import Path
 import bpy
 
 root = Path(__file__).resolve().parents[1]
-bpy.ops.wm.open_mainfile(filepath=str(root / "artifacts" / os.environ.get("CATANI_DEMO_NAME", "CatAni_Wave_Demo.blend")))
+bpy.ops.wm.open_mainfile(filepath=str(root / "artifacts" / os.environ.get("CATANI_DEMO_NAME", "CatAni_Motion_Demo.blend")))
 data = json.loads(bpy.context.scene["catani_verification"])
 rig = bpy.data.objects[data["rig"]]
 max_error = 0.0
