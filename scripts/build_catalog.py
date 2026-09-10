@@ -32,6 +32,63 @@ CMU_SOURCE = {
     "rig_profile": "cmu",
 }
 
+BANDAI_REPO = "BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset"
+BANDAI_REVISION = "74ead3ba1ae4696404e6086233779f60de8bf9ef"
+BANDAI_RAW = f"https://raw.githubusercontent.com/{BANDAI_REPO}/{BANDAI_REVISION}"
+
+BANDAI_SOURCE = {
+    "name": "Bandai Namco Research Motion Dataset",
+    "source_name": "Bandai Namco Research Inc. · Motion Style Transfer 데이터셋",
+    "source_url": f"https://github.com/{BANDAI_REPO}",
+    "license_note": "CC BY-NC 4.0 · 비상업 용도만 허용합니다. 상업 제품에는 쓸 수 없고 출처 표기가 필요합니다.",
+    "license_url": "https://creativecommons.org/licenses/by-nc/4.0/",
+    "commercial_use": False,
+    "revision": BANDAI_REVISION,
+    "base_url": BANDAI_RAW + "/",
+    "rig_profile": "generic",
+}
+
+# 파일명이 `dataset-N_{동작}_{스타일}_{번호}`라 별도 인덱스 없이 이름과 분류를 얻는다.
+# (한국어 이름, 분류 키)
+BANDAI_CONTENT = {
+    "walk": ("걷기", "walk"),
+    "walk-turn-left": ("걷다가 좌회전", "turn"),
+    "walk-turn-right": ("걷다가 우회전", "turn"),
+    "walk-back": ("뒤로 걷기", "backward"),
+    "walk-left": ("왼쪽으로 걷기", "sidestep"),
+    "walk-right": ("오른쪽으로 걷기", "sidestep"),
+    "run": ("달리기", "run"),
+    "dash": ("전력 질주", "run"),
+    "raise-up-left-hand": ("왼손 들기", "gesture"),
+    "raise-up-right-hand": ("오른손 들기", "gesture"),
+    "raise-up-both-hands": ("두 손 들기", "gesture"),
+    "wave-left-hand": ("왼손 흔들기", "wave"),
+    "wave-right-hand": ("오른손 흔들기", "wave"),
+    "wave-both-hands": ("두 손 흔들기", "wave"),
+    "bow": ("절", "bow"),
+    "bye": ("작별 인사", "wave"),
+    "byebye": ("손 흔들어 작별", "wave"),
+    "guide": ("길 안내", "gesture"),
+    "call": ("부르기", "gesture"),
+    "respond": ("응답", "gesture"),
+    "punch": ("펀치", "punch"),
+    "kick": ("발차기", "kick"),
+    "slash": ("베기", "sword"),
+    "dance-long": ("춤 (긴 것)", "dance"),
+    "dance-short": ("춤 (짧은 것)", "dance"),
+}
+
+BANDAI_STYLE = {
+    "normal": "보통", "active": "활발", "exhausted": "지친", "elderly": "노년",
+    "feminine": "여성적", "masculine": "남성적", "masculinity": "남성적", "youthful": "젊은",
+    "angry": "화난", "childish": "아이 같은", "chimpira": "불량한", "giant": "거대한",
+    "happy": "행복한", "musical": "뮤지컬", "not-confident": "자신 없는", "old": "늙은",
+    "proud": "당당한", "sad": "슬픈", "tired": "피곤한",
+}
+
+# 큐레이션된 단일 동작이라 CMU보다 짧다. 하한을 따로 둔다.
+BANDAI_MIN_BYTES = 20_000
+
 # 크기가 너무 작으면 쓸 만한 동작이 없고, 너무 크면 다운로드와 굽기가 무거워진다.
 # 상한은 source_catalog.MAX_FILE_BYTES(32MB) 안에 둔다.
 MIN_BYTES = 60_000
@@ -242,19 +299,78 @@ def collect(verbose=True):
     return motions
 
 
+def collect_bandai(verbose=True):
+    """Bandai Namco Research 데이터셋을 파일명에서 읽어 카탈로그 항목으로 만든다."""
+    tree = request_json(f"https://api.github.com/repos/{BANDAI_REPO}/git/trees/{BANDAI_REVISION}?recursive=1")
+    if tree.get("truncated"):
+        raise ValueError("Bandai Namco git 트리가 잘려 반환되었습니다.")
+    picked = []
+    skipped = {}
+    for item in tree["tree"]:
+        if item["type"] != "blob" or not item["path"].endswith(".bvh"):
+            continue
+        stem = Path(item["path"]).stem
+        parts = stem.split("_")
+        if len(parts) != 4:
+            skipped["이름 형식"] = skipped.get("이름 형식", 0) + 1
+            continue
+        _dataset, content, style, number = parts
+        if content not in BANDAI_CONTENT or style not in BANDAI_STYLE:
+            skipped[f"미등록 {content}/{style}"] = skipped.get(f"미등록 {content}/{style}", 0) + 1
+            continue
+        if not BANDAI_MIN_BYTES <= item["size"] <= MAX_BYTES:
+            skipped["크기밖"] = skipped.get("크기밖", 0) + 1
+            continue
+        picked.append((stem, content, style, number, item))
+    picked.sort(key=lambda entry: entry[0])
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        headers = list(pool.map(lambda entry: motion_header(f"{BANDAI_RAW}/{entry[4]['path']}"), picked))
+
+    motions = []
+    for (stem, content, style, number, blob), (frames, fps) in zip(picked, headers):
+        korean, category = BANDAI_CONTENT[content]
+        mood = BANDAI_STYLE[style]
+        seconds = frames / fps if frames and fps else 0.0
+        detail = f"Bandai Namco Research · {content} · {style} · CC BY-NC 4.0(비상업)"
+        if seconds:
+            detail += f" · {frames}프레임 / 약 {seconds:.1f}초"
+        motions.append({
+            "id": f"bandai_{stem}",
+            "source": "bandai",
+            "category": category,
+            "name": f"{korean} · {mood} {number}"[:44],
+            "tags": sorted({korean, mood, "비상업", "noncommercial", "bandai",
+                            *re.split(r"[^a-z]+", f"{content} {style}")} - {""}, key=str),
+            "description": detail,
+            "remote_path": blob["path"],
+            "local_path": f"BandaiNamco/{Path(blob['path']).name}",
+            "size_bytes": blob["size"],
+            "blob_sha1": blob["sha"],
+            "frames": frames,
+            "fps": round(fps, 4),
+        })
+        if verbose:
+            print(f"  {motions[-1]['id']:46s} {motions[-1]['name']}", file=sys.stderr)
+    if skipped:
+        print(json.dumps({"bandai_skipped": skipped}, ensure_ascii=False), file=sys.stderr)
+    return motions
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default=str(OUTPUT))
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
-    motions = collect(verbose=not args.quiet)
+    motions = collect(verbose=not args.quiet) + collect_bandai(verbose=not args.quiet)
     if len({item["id"] for item in motions}) != len(motions):
         raise ValueError("카탈로그 ID가 중복되었습니다.")
     document = {
         "schema_version": 1,
         "generated_by": "scripts/build_catalog.py",
-        "sources": {"cmu": CMU_SOURCE},
-        "categories": {key: korean for key, korean, *_ in (*CATEGORIES, UNKNOWN)},
+        "sources": {"cmu": CMU_SOURCE, "bandai": BANDAI_SOURCE},
+        # `bow`는 Bandai Namco 쪽에만 있는 분류라 CMU 분류표 뒤에 붙인다.
+        "categories": {**{key: korean for key, korean, *_ in (*CATEGORIES, UNKNOWN)}, "bow": "절·인사"},
         "motions": motions,
     }
     path = Path(args.output)

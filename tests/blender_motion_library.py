@@ -68,6 +68,8 @@ library = Path(temporary.name)
 
 settings = bpy.context.scene.catani_settings
 settings.motion_library_path = str(library)
+# 이 검사는 카탈로그 전체를 훑으므로 비상업 출처까지 목록에 넣는다.
+settings.include_noncommercial = True
 
 # 검색은 로컬 파일과 아직 받지 않은 공개 카탈로그를 한 목록에 담는다.
 settings.motion_query = ""

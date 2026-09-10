@@ -37,6 +37,7 @@ class MotionAsset:
     size_bytes: int = 0
     available: bool = True
     category: str = ""
+    commercial_use: bool = True
 
 
 def addon_root():
@@ -187,7 +188,8 @@ def make_asset(filepath, meta=None, relative=""):
         name=title, path=str(path), file_type=extension[1:],
         tags=tags or normalize_tags(title),
         source_id=source.id if source else "", size_bytes=path.stat().st_size,
-        available=True, category=category.strip() or (source.category if source else ""), **text,
+        available=True, category=category.strip() or (source.category if source else ""),
+        commercial_use=source.commercial_use if source is not None else True, **text,
     )
 
 
@@ -240,7 +242,7 @@ def catalog_pool():
             license_note=entry.license_note, license_url=entry.license_url,
             download_url=entry.download_url, sha256=entry.sha256, blob_sha1=entry.blob_sha1,
             source_id=entry.id, size_bytes=entry.size_bytes, available=False,
-            category=entry.category,
+            category=entry.category, commercial_use=entry.commercial_use,
         ), entry.local_path) for entry in CATALOG]
         _CATALOG_ASSETS = tuple(sorted(pool, key=lambda pair: pair[0].name))
     return _CATALOG_ASSETS
@@ -265,7 +267,7 @@ def _present_names(roots, relatives):
     return present
 
 
-def catalog_assets(directories=(), existing_urls=()):
+def catalog_assets(directories=(), existing_urls=(), commercial_only=False):
     """아직 받지 않은 공개 카탈로그 항목만 목록 형태로 돌려준다."""
     roots = []
     for directory in ([directories] if isinstance(directories, (str, Path)) else directories):
@@ -276,23 +278,27 @@ def catalog_assets(directories=(), existing_urls=()):
     pool = catalog_pool()
     present = _present_names(roots, (relative for _, relative in pool)) if roots else set()
     return [asset for asset, relative in pool
-            if asset.download_url not in known and relative not in present]
+            if asset.download_url not in known and relative not in present
+            and not (commercial_only and not asset.commercial_use)]
 
 
-def filter_assets(assets, category="", local_only=False):
-    """카테고리와 '받은 모션만' 조건으로 목록을 좁힌다."""
+def filter_assets(assets, category="", local_only=False, commercial_only=False):
+    """카테고리·'받은 모션만'·상업 사용 가능 조건으로 목록을 좁힌다."""
     result = list(assets)
     if category:
         result = [asset for asset in result if asset.category == category]
     if local_only:
         result = [asset for asset in result if asset.available]
+    if commercial_only:
+        result = [asset for asset in result if asset.commercial_use]
     return result
 
 
-def browse(directory, query="", extra=(), category="", local_only=False):
+def browse(directory, query="", extra=(), category="", local_only=False, commercial_only=False):
     """받아 둔 모션을 먼저, 아직 받지 않은 공개 모션을 뒤에 놓고 검색한다.
 
     `extra`는 애드온에 동봉한 예제처럼 읽기 전용으로 함께 훑을 폴더다.
+    `commercial_only`면 비상업 라이선스 데이터를 목록에서 뺀다.
     """
     roots = []
     for candidate in [directory, *([extra] if isinstance(extra, (str, Path)) else extra)]:
@@ -307,8 +313,27 @@ def browse(directory, query="", extra=(), category="", local_only=False):
                 seen.add(asset.path)
                 local.append(asset)
     local.sort(key=lambda asset: asset.name)
-    remote = [] if local_only else catalog_assets(roots, {asset.download_url for asset in local if asset.download_url})
+    # 라이선스 조건은 검색 전에 걸러야 한다. 뒤로 미루면 목록에 들어가지도 않을
+    # 항목까지 검색 문자열을 만들게 된다.
+    if commercial_only:
+        local = [asset for asset in local if asset.commercial_use]
+    remote = [] if local_only else catalog_assets(
+        roots, {asset.download_url for asset in local if asset.download_url}, commercial_only=commercial_only)
     return filter_assets(search_assets(local + remote, query), category, local_only)
+
+
+_HAYSTACKS = {}
+
+
+def _haystack(asset):
+    """검색 대상 문자열. 아직 받지 않은 카탈로그 항목은 바뀌지 않으므로 기억해 둔다."""
+    if not asset.path:
+        cached = _HAYSTACKS.get(asset.identifier)
+        if cached is None:
+            cached = _HAYSTACKS[asset.identifier] = " ".join(
+                (asset.name, asset.description, " ".join(asset.tags))).casefold()
+        return cached
+    return " ".join((asset.name, asset.description, " ".join(asset.tags), Path(asset.path).name)).casefold()
 
 
 def search_assets(assets, query):
@@ -320,9 +345,4 @@ def search_assets(assets, query):
     tokens = normalize_tags(query)
     if not tokens:
         return list(assets)
-    matches = []
-    for asset in assets:
-        haystack = " ".join((asset.name, asset.description, " ".join(asset.tags), Path(asset.path).name)).casefold()
-        if all(token in haystack for token in tokens):
-            matches.append(asset)
-    return matches
+    return [asset for asset in assets if all(token in _haystack(asset) for token in tokens)]

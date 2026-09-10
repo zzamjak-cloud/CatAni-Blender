@@ -39,6 +39,10 @@ VARIANTS = {
     "deform": ("DEF-spine", ("DEF-spine.001", "DEF-spine.002", "DEF-spine.003"), "DEF-neck", "DEF-head",
                ("DEF-shoulder.{side}", "DEF-upper_arm.{side}", "DEF-forearm.{side}", "DEF-hand.{side}",
                 "DEF-thigh.{side}", "DEF-shin.{side}", "DEF-foot.{side}", "DEF-toe.{side}"), "L", "R"),
+    # Unity 휴머노이드 계열. Bandai Namco Research 데이터셋이 이 이름을 쓴다.
+    "generic": ("Hips", ("Spine", "Chest", "UpperChest"), "Neck", "Head",
+                ("Shoulder_{side}", "UpperArm_{side}", "LowerArm_{side}", "Hand_{side}",
+                 "UpperLeg_{side}", "LowerLeg_{side}", "Foot_{side}", "Toes_{side}"), "L", "R"),
     # 규격 표에 없는 이름. 별칭 + 계층 검증으로 메워야 한다.
     "custom": ("Waist", ("TorsoLower", "TorsoUpper", "RibCage"), "NeckLower", "Skull",
                ("{side}_Collar", "{side}_UpArm", "{side}_LowerArm", "{side}_Wrist",

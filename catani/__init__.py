@@ -66,6 +66,7 @@ def _fill(item, asset):
     item.size_bytes = min(asset.size_bytes, 2**31 - 1)
     item.available = asset.available
     item.category = asset.category
+    item.commercial_use = asset.commercial_use
 
 
 def refresh(scene, keep=""):
@@ -76,7 +77,8 @@ def refresh(scene, keep=""):
         assets = browse(bpy.path.abspath(settings.motion_library_path), settings.motion_query,
                         extra=[str(bundled_library_path())],
                         category="" if settings.motion_category == "ALL" else settings.motion_category,
-                        local_only=settings.local_only)
+                        local_only=settings.local_only,
+                        commercial_only=not settings.include_noncommercial)
     except (ValueError, OSError) as error:
         settings.motions.clear()
         settings.motion_status = str(error)[:250]
@@ -103,7 +105,7 @@ def _asset(item):
         license_note=item.license_note, license_url=item.license_url,
         download_url=item.download_url, sha256=item.sha256, blob_sha1=item.blob_sha1,
         source_id=item.source_id, size_bytes=item.size_bytes, available=item.available,
-        category=item.category,
+        category=item.category, commercial_use=item.commercial_use,
     )
 
 
@@ -354,6 +356,7 @@ class CatAniMotionItem(bpy.types.PropertyGroup):
     size_bytes: IntProperty()
     available: BoolProperty(default=True)
     category: StringProperty()
+    commercial_use: BoolProperty(default=True)
 
 
 class CatAniSettings(bpy.types.PropertyGroup):
@@ -361,6 +364,9 @@ class CatAniSettings(bpy.types.PropertyGroup):
     motion_category: EnumProperty(name="카테고리", description="공개 카탈로그의 동작 분류로 목록을 좁힙니다",
                                   items=_CATEGORY_ITEMS, default="ALL", update=_on_search)
     local_only: BoolProperty(name="받은 모션만", description="이미 내려받아 바로 재생할 수 있는 모션만 남깁니다", default=False, update=_on_search)
+    include_noncommercial: BoolProperty(name="비상업 데이터 포함",
+                                        description="CC BY-NC처럼 상업 사용이 금지된 출처를 목록에 넣습니다. 목록에서 NC 배지로 표시되며, 상업 제품에는 쓸 수 없습니다",
+                                        default=False, update=_on_search)
     motions: CollectionProperty(type=CatAniMotionItem)
     motion_active: IntProperty(name="선택 모션", default=0)
     preview_active: BoolProperty(default=False, options={"HIDDEN"})
@@ -399,6 +405,8 @@ class CATANI_UL_motions(bpy.types.UIList):
         row.label(text=item.name, icon="ARMATURE_DATA" if item.available else "IMPORT")
         badge = row.row()
         badge.alignment = "RIGHT"
+        if not item.commercial_use:
+            badge.label(text="NC", icon="ERROR")
         badge.label(text=item.file_type.upper() if item.available else f"받기 {item.size_bytes / 1024:.0f}KB")
 
 
@@ -487,7 +495,10 @@ class CATANI_OT_motion_apply(bpy.types.Operator):
             f"{report['frame_start']}~{report['frame_end']}f · 키 {report['keyframes']:,}개{saved} · "
             f"방향 오차 {report['max_direction_error']:.2f}°{warning}"
         )
-        self.report({"WARNING"} if warning else {"INFO"}, settings.motion_status)
+        if not asset.commercial_use:
+            settings.motion_status += " · 비상업 데이터(상업 제품 사용 금지)"
+            settings.apply_report += f"\n라이선스: {asset.license_note}"
+        self.report({"WARNING"} if warning or not asset.commercial_use else {"INFO"}, settings.motion_status)
 
 
 def _existing_source(asset):
@@ -804,6 +815,7 @@ class CATANI_OT_settings(bpy.types.Operator):
         column.prop(settings, "ground_contact")
         column.prop(settings, "use_ik")
         column.prop(settings, "hide_source")
+        column.prop(settings, "include_noncommercial")
         row = column.row(align=True)
         row.operator("catani.motion_refresh", icon="FILE_REFRESH")
         row.operator("catani.motion_download", icon="IMPORT").source_id = ""

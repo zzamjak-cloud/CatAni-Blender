@@ -82,6 +82,8 @@ _RIGIFY_LIMBS = ("shoulder.{side}", "upper_arm.{side}", "forearm.{side}", "hand.
 _UNREAL_LIMBS = ("clavicle_{side}", "upperarm_{side}", "lowerarm_{side}", "hand_{side}", "thigh_{side}", "calf_{side}", "foot_{side}", "ball_{side}")
 _BIPED_LIMBS = ("{side}Clavicle", "{side}UpperArm", "{side}Forearm", "{side}Hand", "{side}Thigh", "{side}Calf", "{side}Foot", "{side}Toe0")
 _DAZ_LIMBS = ("{side}Collar", "{side}ShldrBend", "{side}ForearmBend", "{side}Hand", "{side}ThighBend", "{side}Shin", "{side}Foot", "{side}Toe")
+# Unity 휴머노이드 계열의 흔한 이름. Bandai Namco Research 데이터셋이 그대로 쓴다.
+_GENERIC_LIMBS = ("Shoulder_{side}", "UpperArm_{side}", "LowerArm_{side}", "Hand_{side}", "UpperLeg_{side}", "LowerLeg_{side}", "Foot_{side}", "Toes_{side}")
 
 # 알려진 리그 규격. 위에서부터 일치 개수를 세어 가장 잘 맞는 규격을 고른다.
 PROFILES = {
@@ -92,6 +94,7 @@ PROFILES = {
     "unreal": ("Unreal / UE 스켈레톤", _humanoid("pelvis", ("spine_01", "spine_02", "spine_03"), "neck_01", "head", _UNREAL_LIMBS, "l", "r")),
     "biped": ("3ds Max Biped", _humanoid("Pelvis", ("Spine", "Spine1", "Spine2"), "Neck", "Head", _BIPED_LIMBS, "L ", "R ")),
     "daz": ("Daz Genesis", _humanoid("hip", ("abdomenLower", "abdomenUpper", "chestLower"), "neckLower", "head", _DAZ_LIMBS, "l", "r")),
+    "generic": ("Unity 휴머노이드 계열", _humanoid("Hips", ("Spine", "Chest"), "Neck", "Head", _GENERIC_LIMBS, "L", "R")),
 }
 
 # 규격으로 못 채운 빈칸을 메울 별칭. 계층 검증을 통과한 후보만 받아들인다.

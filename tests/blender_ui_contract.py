@@ -94,11 +94,26 @@ for entry in CATALOG:
     assert entry.source_name not in joined, "출처 문구가 주 패널에 노출되었습니다"
 assert {"catani.motion_info", "catani.settings"} <= set(main["operators"]), main["operators"]
 
-# 출처 팝업이 실제 다운로드 주소와 이용 조건, 원문 링크를 담는지.
+# 라이선스 계약: 비상업 출처는 토글을 켜야만 목록에 들어오고 배지로 구분된다.
 settings.motion_library_path = ""
 settings.motion_query = ""
+limited = [entry for entry in CATALOG if not entry.commercial_use]
+assert limited, "비상업 출처가 카탈로그에 없어 계약을 검사할 수 없습니다"
+settings.include_noncommercial = False
 addon.refresh(bpy.context.scene)
-assert len(settings.motions) == len(CATALOG), [item.name for item in settings.motions]
+assert all(item.commercial_use for item in settings.motions), "비상업 항목이 기본 목록에 들어왔습니다"
+without = len(settings.motions)
+settings.include_noncommercial = True
+addon.refresh(bpy.context.scene)
+assert len(settings.motions) - without == len(limited), (len(settings.motions), without, len(limited))
+assert sum(1 for item in settings.motions if not item.commercial_use) == len(limited)
+# 목록 한 줄이 비상업 항목에 NC 배지를 단다.
+row = record(lambda self, context: addon.CATANI_UL_motions.draw_item(
+    addon.CATANI_UL_motions, context, self.layout, None,
+    next(item for item in settings.motions if not item.commercial_use), 0, None, None, 0), bpy.context)
+assert "NC" in row["labels"], row["labels"]
+
+# 출처 팝업이 실제 다운로드 주소와 이용 조건, 원문 링크를 담는지.
 settings.motion_active = 0
 selected = settings.motions[0]
 info = record(addon.CATANI_OT_motion_info.draw, bpy.context)

@@ -12,7 +12,8 @@ package = types.ModuleType("catani")
 package.__path__ = [str(root / "catani")]
 sys.modules["catani"] = package
 
-from catani.motion_library import browse, catalog_assets, make_asset, read_manifest, scan_library, search_assets, update_manifest
+from catani.motion_library import (MotionAsset, browse, catalog_assets, filter_assets, make_asset,
+                                   read_manifest, scan_library, search_assets, update_manifest)
 from catani.source_catalog import CATALOG
 
 
@@ -119,6 +120,16 @@ class MotionLibraryTests(unittest.TestCase):
                     scan_library(library)
             with self.assertRaises(ValueError):
                 scan_library(manifest)
+
+    def test_filter_hides_noncommercial(self):
+        """비상업 라이선스 출처는 기본 목록에서 빠져야 한다."""
+        free = MotionAsset(identifier="a", name="자유", path="", file_type="bvh", category="walk")
+        limited = MotionAsset(identifier="b", name="비상업", path="", file_type="bvh",
+                              category="walk", commercial_use=False)
+        self.assertEqual([a.name for a in filter_assets([free, limited])], ["자유", "비상업"])
+        self.assertEqual([a.name for a in filter_assets([free, limited], commercial_only=True)], ["자유"])
+        self.assertEqual([a.name for a in filter_assets([free, limited], category="walk", commercial_only=True)], ["자유"])
+        self.assertEqual(filter_assets([limited], commercial_only=True), [])
 
     def test_search_finds_file_name_after_rename(self):
         """이름을 바꿔도 원본 파일 이름으로 찾을 수 있어야 한다."""
