@@ -1,7 +1,6 @@
 """공개 BVH를 검증하여 내려받고 로컬 인덱스에 출처를 기록한다."""
 
 import hashlib
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -9,7 +8,7 @@ import threading
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from .motion_library import read_manifest
+from .motion_library import read_manifest, update_manifest
 from .source_catalog import ALLOWED_HOSTS, MAX_FILE_BYTES
 
 
@@ -44,25 +43,15 @@ def _check_cancel(cancel_event):
 
 
 def _write_metadata(entry, root):
-    manifest = read_manifest(root)
-    document = json.loads((root / "motions.json").read_text(encoding="utf-8")) if (root / "motions.json").exists() else {"schema_version": 1}
-    manifest[entry.local_path] = {
-        "file": entry.local_path, "name": entry.name, "tags": list(entry.tags),
+    """이미 손으로 바꿔 둔 이름은 지우지 않고, 없을 때만 카탈로그 이름을 넣는다."""
+    kept = read_manifest(root).get(entry.local_path, {})
+    update_manifest(root, entry.local_path, {
+        "name": kept.get("name") or entry.name, "tags": list(entry.tags),
         "description": entry.description, "source_name": entry.source_name,
         "source_url": entry.source_url, "license_note": entry.license_note,
         "license_url": entry.license_url, "download_url": entry.download_url,
         "sha256": entry.sha256, "blob_sha1": entry.blob_sha1,
-    }
-    temporary = None
-    document["motions"] = list(manifest.values())
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=root, prefix=".catani-index-", suffix=".part", delete=False) as stream:
-            temporary = Path(stream.name)
-            json.dump(document, stream, ensure_ascii=False, indent=2)
-        os.replace(temporary, root / "motions.json")
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    })
 
 
 def download_asset(entry, library_dir, *, progress=None, cancel_event=None, opener=None):

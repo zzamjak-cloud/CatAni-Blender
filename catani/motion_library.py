@@ -2,9 +2,11 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-import json
-import re
 import hashlib
+import json
+import os
+import re
+import tempfile
 
 from .source_catalog import CATALOG
 
@@ -105,8 +107,52 @@ def read_manifest(directory):
     return result
 
 
-def make_asset(filepath, meta=None):
-    """로컬 파일 하나를 목록 항목으로 만든다. meta는 motions.json 항목이다."""
+def catalog_entry_for(relative="", download_url=""):
+    """로컬 파일이 어느 공개 카탈로그 항목인지 찾는다. 주소가 있으면 그것을 먼저 믿는다."""
+    if download_url:
+        matched = next((entry for entry in CATALOG if entry.download_url == download_url), None)
+        if matched is not None:
+            return matched
+    key = str(relative).strip().replace("\\", "/")
+    return next((entry for entry in CATALOG if key and entry.local_path == key), None)
+
+
+def update_manifest(directory, relative, fields):
+    """motions.json의 항목 하나를 갱신한다. 임시 파일에 쓰고 교체해 중간 상태를 남기지 않는다."""
+    library = Path(directory).expanduser().resolve()
+    if not library.is_dir():
+        raise ValueError(f"모션 폴더를 찾을 수 없습니다: {library}")
+    key = str(relative).replace("\\", "/")
+    if not key or Path(key).is_absolute() or ".." in Path(key).parts:
+        raise ValueError("모션 폴더 안의 상대 경로만 기록할 수 있습니다.")
+    manifest = read_manifest(library)
+    index = library / "motions.json"
+    document = json.loads(index.read_text(encoding="utf-8")) if index.exists() else {"schema_version": 1}
+    entry = dict(manifest.get(key, {}))
+    entry.update(fields)
+    entry["file"] = key
+    manifest[key] = entry
+    document["motions"] = list(manifest.values())
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=library, prefix=".catani-index-", suffix=".part", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(document, stream, ensure_ascii=False, indent=2)
+        os.replace(temporary, index)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return entry
+
+
+def make_asset(filepath, meta=None, relative=""):
+    """로컬 파일 하나를 목록 항목으로 만든다. meta는 motions.json 항목이다.
+
+    motions.json이 없어도 폴더 안 상대 경로가 공개 카탈로그와 맞으면 그 이름과
+    출처를 살린다. 예전 버전이 받아 둔 `CMU/105_59.bvh`가 목록에서 `105 59`로만
+    보이던 문제를 막는다.
+    """
     meta = meta or {}
     path = Path(filepath).expanduser().resolve()
     if not path.is_file():
@@ -120,12 +166,23 @@ def make_asset(filepath, meta=None):
         if not isinstance(value, str):
             raise ValueError(f"모션 {name}는 문자열이어야 합니다.")
         text[name] = value.strip()
-    title = text.pop("name") or path.stem.replace("_", " ").replace("-", " ")
-    source = next((entry for entry in CATALOG if text["download_url"] and entry.download_url == text["download_url"]), None)
+    title = text.pop("name")
+    source = catalog_entry_for(relative, text["download_url"])
+    if source is not None:
+        title = title or source.name
+        for field, value in (("description", source.description), ("source_name", source.source_name),
+                             ("source_url", source.source_url), ("license_note", source.license_note),
+                             ("license_url", source.license_url), ("download_url", source.download_url),
+                             ("blob_sha1", source.blob_sha1), ("sha256", source.sha256)):
+            text[field] = text[field] or value
+    title = title or path.stem.replace("_", " ").replace("-", " ")
+    tags = normalize_tags(meta.get("tags", ()))
+    if not tags and source is not None:
+        tags = normalize_tags(source.tags)
     return MotionAsset(
         identifier=hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:20],
         name=title, path=str(path), file_type=extension[1:],
-        tags=normalize_tags(meta.get("tags", ())) or normalize_tags(title),
+        tags=tags or normalize_tags(title),
         source_id=source.id if source else "", size_bytes=path.stat().st_size,
         available=True, category=source.category if source else "", **text,
     )
@@ -157,7 +214,8 @@ def scan_library(directory):
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             continue
-        assets.append(make_asset(path, manifest.get(path.relative_to(root).as_posix(), {})))
+        relative = path.relative_to(root).as_posix()
+        assets.append(make_asset(path, manifest.get(relative, {}), relative))
     return sorted(assets, key=lambda asset: asset.name)
 
 

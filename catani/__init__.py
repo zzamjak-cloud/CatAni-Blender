@@ -10,7 +10,7 @@ from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatPrope
 from . import retarget
 from .motion_downloader import DownloadJob
 from .motion_import import import_asset
-from .motion_library import MotionAsset, browse, bundled_library_path, normalize_tags, read_length
+from .motion_library import MotionAsset, browse, bundled_library_path, normalize_tags, read_length, update_manifest
 from .source_catalog import CATEGORIES, get_source
 
 # {"download": DownloadJob, "scene": Scene, "apply": bool, "preview": bool, "path": str}
@@ -107,6 +107,18 @@ def _selected(settings):
     if not 0 <= settings.motion_active < len(settings.motions):
         raise ValueError("목록에서 적용할 모션을 선택하세요.")
     return settings.motions[settings.motion_active]
+
+
+def _library_slot(settings, item):
+    """이름을 적어 둘 모션 폴더와 그 안에서의 상대 경로. 동봉 예제는 쓰기 대상이 아니다."""
+    if not item.available or not item.path:
+        raise ValueError("아직 받지 않은 모션입니다. 받은 뒤에 이름을 바꿀 수 있습니다.")
+    path = Path(bpy.path.abspath(item.path)).expanduser().resolve()
+    library = Path(bpy.path.abspath(settings.motion_library_path or user_library_path())).expanduser().resolve()
+    try:
+        return library, path.relative_to(library).as_posix()
+    except ValueError:
+        raise ValueError("애드온에 동봉한 예제는 이름을 바꿀 수 없습니다. 모션 폴더 안의 파일만 바꿉니다.") from None
 
 
 def _target(context, settings):
@@ -650,6 +662,48 @@ class CATANI_OT_download_cancel(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CATANI_OT_motion_rename(bpy.types.Operator):
+    bl_idname = "catani.motion_rename"
+    bl_label = "이름 바꾸기"
+    bl_description = "목록에 보일 이름을 바꿔 모션 폴더의 motions.json에 저장합니다"
+
+    new_name: StringProperty(name="이름", default="")
+
+    @classmethod
+    def poll(cls, context):
+        settings = context.scene.catani_settings
+        return _job is None and 0 <= settings.motion_active < len(settings.motions) and settings.motions[settings.motion_active].available
+
+    def invoke(self, context, _event):
+        self.new_name = _selected(context.scene.catani_settings).name
+        return context.window_manager.invoke_props_dialog(self, width=460)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.prop(self, "new_name", text="")
+        layout.label(text="모션 폴더의 motions.json에 적어 두므로 다음에 열어도 유지됩니다.", icon="INFO")
+
+    def execute(self, context):
+        settings = context.scene.catani_settings
+        title = " ".join(self.new_name.split())
+        if not title:
+            self.report({"ERROR"}, "이름을 입력하세요.")
+            return {"CANCELLED"}
+        try:
+            item = _selected(settings)
+            identifier = item.identifier
+            library, relative = _library_slot(settings, item)
+            update_manifest(library, relative, {"name": title})
+        except (ValueError, OSError) as error:
+            self.report({"ERROR"}, str(error)[:250])
+            settings.motion_status = str(error)[:250]
+            return {"CANCELLED"}
+        refresh(context.scene, keep=identifier)
+        settings.motion_status = f"이름을 바꿨습니다: {title}"
+        _redraw()
+        return {"FINISHED"}
+
+
 class CATANI_OT_motion_info(bpy.types.Operator):
     bl_idname = "catani.motion_info"
     bl_label = "출처 · 이용 조건"
@@ -757,7 +811,9 @@ class CATANI_PT_main(bpy.types.Panel):
             layout.label(text=str(error), icon="INFO")
         else:
             info = layout.column(align=True)
-            info.label(text=chosen.name, icon="ARMATURE_DATA" if chosen.available else "IMPORT")
+            head = info.row(align=True)
+            head.label(text=chosen.name, icon="ARMATURE_DATA" if chosen.available else "IMPORT")
+            head.operator("catani.motion_rename", text="", icon="GREASEPENCIL")
             info.label(text=f"{chosen.file_type.upper()} · {chosen.size_bytes / 1024:.0f}KB · "
                             f"{CATEGORIES.get(chosen.category, chosen.category or '없음')}")
             length = _duration_line(chosen)
@@ -789,7 +845,7 @@ _classes = (
     CATANI_OT_motion_refresh, CATANI_OT_motion_apply, CATANI_OT_motion_import,
     CATANI_OT_motion_preview, CATANI_OT_preview_clear,
     CATANI_OT_motion_download, CATANI_OT_download_cancel,
-    CATANI_OT_motion_info, CATANI_OT_settings,
+    CATANI_OT_motion_rename, CATANI_OT_motion_info, CATANI_OT_settings,
     CATANI_PT_main,
 )
 

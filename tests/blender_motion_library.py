@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import hashlib
 import io
+import json
 import tempfile
 from unittest.mock import patch
 
@@ -210,7 +211,32 @@ assert not settings.preview_collection, "이미 있던 원본을 정리 대상�
 assert bpy.ops.catani.preview_clear() == {"FINISHED"}
 assert source.hide_get(), "재사용한 원본을 다시 숨기지 않았습니다"
 
+# 이름 바꾸기: motions.json에 적히고 목록에 바로 반영되며 선택도 유지된다.
+settings.motion_library_path = str(download_directory)
+settings.motion_query = ""
+addon.refresh(bpy.context.scene)
+settings.motion_active = next(index for index, item in enumerate(settings.motions) if item.source_id == entry.id)
+identifier = settings.motions[settings.motion_active].identifier
+assert bpy.ops.catani.motion_rename(new_name="  내가 고른   걷기  ") == {"FINISHED"}, settings.motion_status
+renamed = settings.motions[settings.motion_active]
+assert renamed.identifier == identifier, "이름을 바꾼 뒤 선택이 옮겨갔습니다"
+assert renamed.name == "내가 고른 걷기", renamed.name
+assert renamed.source_id == entry.id, "이름만 바꿨는데 출처가 사라졌습니다"
+assert json.loads((download_directory / "motions.json").read_text(encoding="utf-8"))["motions"][0]["name"] == "내가 고른 걷기"
+addon.refresh(bpy.context.scene)
+assert settings.motions[settings.motion_active].name == "내가 고른 걷기", "다시 읽었을 때 이름이 사라졌습니다"
+expect_cancelled(bpy.ops.catani.motion_rename, new_name="   ")
+# 아직 받지 않은 모션은 적어 둘 파일이 없으므로 버튼이 잠긴다.
+settings.local_only = False
+addon.refresh(bpy.context.scene)
+pending_index = next((index for index, item in enumerate(settings.motions) if not item.available), None)
+assert pending_index is not None, "받지 않은 공개 모션이 목록에 없습니다"
+settings.motion_active = pending_index
+assert not bpy.ops.catani.motion_rename.poll(), "받지 않은 모션에 이름 바꾸기가 열렸습니다"
+
 addon.unregister()
+assert not hasattr(bpy.types.Scene, "catani_settings")
 addon.register()
+assert hasattr(bpy.types.Scene, "catani_settings")
 temporary.cleanup()
-print("CATANI_PASS 통합 목록·즉시 검색·적용·원본 보존·mock 다운로드 후 자동 적용·미리보기 세션·실패 경로")
+print("CATANI_PASS 통합 목록·즉시 검색·적용·원본 보존·mock 다운로드 후 자동 적용·미리보기 세션·이름 바꾸기·실패 경로")

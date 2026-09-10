@@ -12,7 +12,7 @@ package = types.ModuleType("catani")
 package.__path__ = [str(root / "catani")]
 sys.modules["catani"] = package
 
-from catani.motion_library import browse, catalog_assets, make_asset, scan_library, search_assets
+from catani.motion_library import browse, catalog_assets, make_asset, read_manifest, scan_library, search_assets, update_manifest
 from catani.source_catalog import CATALOG
 
 
@@ -119,6 +119,50 @@ class MotionLibraryTests(unittest.TestCase):
                     scan_library(library)
             with self.assertRaises(ValueError):
                 scan_library(manifest)
+
+    def test_catalog_name_survives_missing_manifest(self):
+        """예전 버전이 받아 둔 파일은 motions.json이 없어도 카탈로그 이름으로 보여야 한다."""
+        entry = CATALOG[0]
+        with tempfile.TemporaryDirectory(prefix="catani-motion-recover-") as directory:
+            library = Path(directory)
+            target = library / entry.local_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("HIERARCHY\nMOTION\n", encoding="utf-8")
+            asset = scan_library(library)[0]
+            self.assertEqual(asset.name, entry.name)
+            self.assertEqual(asset.source_id, entry.id)
+            self.assertEqual(asset.category, entry.category)
+            self.assertEqual(asset.download_url, entry.download_url)
+            self.assertEqual(asset.blob_sha1, entry.blob_sha1)
+            self.assertEqual(asset.tags, tuple(entry.tags))
+            # 파일 이름만 남은 표시(`49 09`)로 떨어지지 않는다.
+            self.assertNotEqual(asset.name, target.stem.replace("_", " "))
+
+    def test_manual_rename_persists_and_wins(self):
+        """손으로 바꾼 이름은 motions.json에 남고 카탈로그 이름을 덮는다."""
+        entry = CATALOG[0]
+        with tempfile.TemporaryDirectory(prefix="catani-motion-rename-") as directory:
+            library = Path(directory)
+            target = library / entry.local_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("HIERARCHY\nMOTION\n", encoding="utf-8")
+            update_manifest(library, entry.local_path, {"name": "발레 1번 · 팔 올리기"})
+            asset = scan_library(library)[0]
+            self.assertEqual(asset.name, "발레 1번 · 팔 올리기")
+            # 이름만 바꿨어도 출처와 체크섬은 카탈로그에서 그대로 이어받는다.
+            self.assertEqual(asset.source_id, entry.id)
+            self.assertEqual(asset.blob_sha1, entry.blob_sha1)
+            # 두 번째 변경은 기존 항목을 늘리지 않고 갱신한다.
+            update_manifest(library, entry.local_path, {"name": "발레 시작 자세"})
+            manifest = read_manifest(library)
+            self.assertEqual(len(manifest), 1)
+            self.assertEqual(manifest[entry.local_path]["name"], "발레 시작 자세")
+            self.assertEqual(scan_library(library)[0].name, "발레 시작 자세")
+            self.assertNotIn(".catani-index-", " ".join(p.name for p in library.iterdir()))
+            with self.assertRaises(ValueError):
+                update_manifest(library, "../탈출.bvh", {"name": "안 됨"})
+            with self.assertRaises(ValueError):
+                update_manifest(library / "없는폴더", entry.local_path, {"name": "안 됨"})
 
     def test_unicode_names_and_stable_ids(self):
         with tempfile.TemporaryDirectory(prefix="catani-motion-library-") as directory:
