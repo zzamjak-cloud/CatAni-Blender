@@ -4,12 +4,25 @@ import math
 import re
 
 import bpy
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 Y_AXIS = Vector((0.0, 1.0, 0.0))
 MIN_PAIRS = 3
 # 뼈 하나에 프레임당 쿼터니언 4채널을 쓰므로 상한을 두어 굽기 폭주를 막는다.
 MAX_KEYFRAMES = 2_000_000
+# 곡선 간소화 기본 허용 오차(도). 0이면 모든 프레임에 키를 남긴다.
+DEFAULT_SIMPLIFY = 0.5
+# 되살리기를 몇 번까지 반복할지. 한 번에 위반 프레임을 모두 넣으므로 보통 1~2회에 끝난다.
+TIGHTEN_ROUNDS = 3
+
+# foreach_set은 enum을 정수로 받으므로 RNA에서 실제 번호를 읽어 캐시한다.
+_KEY_ENUM = {}
+
+
+def _key_enum(prop, identifier):
+    if (prop, identifier) not in _KEY_ENUM:
+        _KEY_ENUM[(prop, identifier)] = bpy.types.Keyframe.bl_rna.properties[prop].enum_items[identifier].value
+    return _KEY_ENUM[(prop, identifier)]
 
 SLOT_ORDER = (
     "hips", "spine_1", "spine_2", "spine_3", "neck", "head",
@@ -330,7 +343,12 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
             matrix = Matrix.LocRotScale(location, desired, Vector((1.0, 1.0, 1.0)))
             pose[bone.name] = matrix
             basis = base.inverted() @ matrix
-            rotations[bone.name].append(basis.to_quaternion())
+            quaternion = basis.to_quaternion()
+            # 부호가 인접 프레임에서 뒤집히면 키를 솎아낸 구간이 통째로 반대로 돈다.
+            series = rotations[bone.name]
+            if series:
+                quaternion.make_compatible(series[-1])
+            series.append(quaternion)
         if ground and ground_bones:
             floor = min(
                 (target_basis @ pose[name] @ offset).z
@@ -347,22 +365,122 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
     return rotations, locations, hips, (max(lift) if lift else 0.0), sum(1 for value in penetration if value > 1e-6)
 
 
-def _write_curves(target, action, frames, rotations, locations, hips):
+def _angle_error(actual, predicted):
+    """샘플 회전과 곡선이 만든 회전 사이의 실제 각도 차이(도)."""
+    interpolated = Quaternion(predicted)
+    if interpolated.magnitude < 1e-9:
+        return 180.0
+    # 보간값은 길이가 1이 아니지만 Blender가 포즈를 만들 때 정규화하므로 같게 맞춘다.
+    interpolated.normalize()
+    difference = Quaternion(actual).normalized().rotation_difference(interpolated).angle
+    return math.degrees(min(difference, math.tau - difference))
+
+
+def _distance_error(actual, predicted):
+    """샘플 이동과 곡선이 만든 이동 사이의 거리(블렌더 단위)."""
+    return (Vector(actual) - Vector(predicted)).length
+
+
+def _simplify(frames, channels, tolerance, metric):
+    """선형 보간 오차가 허용치를 넘는 지점만 키로 남긴다(Ramer-Douglas-Peucker 변형).
+
+    한 부위의 쿼터니언 4채널은 키 위치가 같아야 중간 프레임에서 회전이 뒤틀리지
+    않으므로 채널을 묶어 한 번에 판정한다.
+    """
+    count = len(frames)
+    if count < 3 or tolerance <= 0.0:
+        return list(range(count))
+    keep = [False] * count
+    keep[0] = keep[-1] = True
+    stack = [(0, count - 1)]
+    while stack:
+        left, right = stack.pop()
+        if right - left < 2:
+            continue
+        span = frames[right] - frames[left]
+        worst, chosen = 0.0, -1
+        for position in range(left + 1, right):
+            ratio = (frames[position] - frames[left]) / span if span else 0.0
+            predicted = tuple(values[left] + (values[right] - values[left]) * ratio for values in channels)
+            error = metric(tuple(values[position] for values in channels), predicted)
+            if error > worst:
+                worst, chosen = error, position
+        # 최대 오차가 허용치 안이면 그 사이의 모든 지점도 허용치 안이다.
+        if chosen < 0 or worst <= tolerance:
+            continue
+        keep[chosen] = True
+        stack.append((left, chosen))
+        stack.append((chosen, right))
+    return [index for index, flag in enumerate(keep) if flag]
+
+
+def _tighten(curves, frames, channels, kept, tolerance, metric):
+    """베지어 실측 오차가 허용치를 넘는 프레임을 키로 되살리고 남은 최대 오차를 돌려준다.
+
+    솎아낼 때는 선형 보간을 기준으로 재므로 오토 클램프 핸들이 만든 실제 곡선과 다를 수
+    있다. 여기서 곡선을 직접 평가해 허용치를 보장한다.
+    """
+    remaining = [index for index in range(len(frames)) if index not in set(kept)]
+
+    def measure():
+        worst, over = 0.0, []
+        for index in remaining:
+            predicted = tuple(curve.evaluate(frames[index]) for curve in curves)
+            error = metric(tuple(values[index] for values in channels), predicted)
+            worst = max(worst, error)
+            if error > tolerance:
+                over.append(index)
+        return worst, over
+
+    for _round in range(TIGHTEN_ROUNDS):
+        worst, over = measure()
+        if not over:
+            return worst
+        for index in over:
+            for curve, values in zip(curves, channels):
+                key = curve.keyframe_points.insert(frames[index], values[index])
+                key.interpolation = "BEZIER"
+                key.handle_left_type = "AUTO_CLAMPED"
+                key.handle_right_type = "AUTO_CLAMPED"
+        for curve in curves:
+            curve.update()
+        remaining = [index for index in remaining if index not in set(over)]
+    return measure()[0]
+
+
+def _bake_group(bag, path, group, frames, channels, tolerance, metric):
+    """키 위치를 공유하는 채널 묶음을 희소 베지어 곡선으로 굽는다."""
+    kept = _simplify(frames, channels, tolerance, metric)
+    picked = [frames[index] for index in kept]
+    curves = [_fill(bag, path, index, group, picked, [values[position] for position in kept])
+              for index, values in enumerate(channels)]
+    error = _tighten(curves, frames, channels, kept, tolerance, metric) if tolerance > 0.0 else 0.0
+    return sum(len(curve.keyframe_points) for curve in curves), error
+
+
+def _write_curves(target, action, frames, rotations, locations, hips, simplify=0.0, scale=1.0):
     slot = action.slots.new(id_type="OBJECT", name=target.name)
     layer = action.layers.new("CatAni 리타게팅")
     bag = layer.strips.new(type="KEYFRAME").channelbag(slot, ensure=True)
     target.animation_data.action = action
     target.animation_data.action_slot = slot
     written = 0
+    angle_error = 0.0
+    shift_error = 0.0
     for name, values in rotations.items():
-        bone = target.pose.bones[name]
-        path = bone.path_from_id("rotation_quaternion")
-        for index in range(4):
-            written += _fill(bag, path, index, name, frames, [value[index] for value in values])
+        channels = [[value[index] for value in values] for index in range(4)]
+        path = target.pose.bones[name].path_from_id("rotation_quaternion")
+        count, error = _bake_group(bag, path, name, frames, channels, simplify, _angle_error)
+        written += count
+        angle_error = max(angle_error, error)
     if hips and locations:
+        channels = [[value[index] for value in locations] for index in range(3)]
         path = target.pose.bones[hips].path_from_id("location")
-        for index in range(3):
-            written += _fill(bag, path, index, hips, frames, [value[index] for value in locations])
+        # 회전 오차 θ가 캐릭터 전체에 만드는 변위(키 × θ)를 이동 채널 허용치로 삼는다.
+        tolerance = scale * math.radians(simplify)
+        count, error = _bake_group(bag, path, hips, frames, channels, tolerance, _distance_error)
+        written += count
+        shift_error = error
     # IK가 켜져 있으면 구운 FK 키가 화면에 나타나지 않는다.
     disabled = []
     for bone in target.pose.bones:
@@ -376,19 +494,22 @@ def _write_curves(target, action, frames, rotations, locations, hips):
             curve.update()
             written += 1
             disabled.append(f"{bone.name}/{constraint.name}")
-    return written, disabled
+    return written, disabled, angle_error, shift_error
 
 
 def _fill(bag, path, index, group, frames, values):
+    """키를 한 번에 넣고 오토 클램프 베지어로 만든다. 클램프는 발이 바닥을 뚫는 오버슈트를 막는다."""
     curve = bag.fcurves.new(data_path=path, index=index, group_name=group)
     curve.keyframe_points.add(len(frames))
     coordinates = []
     for frame, value in zip(frames, values):
         coordinates.extend((float(frame), float(value)))
     curve.keyframe_points.foreach_set("co", coordinates)
-    curve.keyframe_points.foreach_set("interpolation", [1] * len(frames))
+    curve.keyframe_points.foreach_set("interpolation", [_key_enum("interpolation", "BEZIER")] * len(frames))
+    for side in ("handle_left_type", "handle_right_type"):
+        curve.keyframe_points.foreach_set(side, [_key_enum(side, "AUTO_CLAMPED")] * len(frames))
     curve.update()
-    return len(frames)
+    return curve
 
 
 def deepest_penetration(context, target, frames, floor):
@@ -424,7 +545,8 @@ def verify(context, source, target, pairs, frames):
     return worst
 
 
-def apply_motion(context, source, target, *, step=1, use_location=True, ground=True, name="CatAni 모션"):
+def apply_motion(context, source, target, *, step=1, use_location=True, ground=True,
+                 simplify=DEFAULT_SIMPLIFY, name="CatAni 모션"):
     """모션 리그의 동작을 캐릭터에 굽고 적용 결과 보고서를 돌려준다."""
     for obj in (source, target):
         if obj is None or obj.type != "ARMATURE":
@@ -436,6 +558,7 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
     if context.mode != "OBJECT":
         raise ValueError("오브젝트 모드에서 적용하세요.")
     step = max(1, int(step))
+    simplify = max(0.0, float(simplify))
     pairs, source_key, target_key, skipped, guessed = build_pairs(source, target)
     start, end = action_frame_range(source)
     frames = list(range(start, end + 1, step))
@@ -473,7 +596,11 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
         _clear_pose(target, {target_bone for _slot, _source, target_bone in pairs})
         target.data.pose_position = "POSE"
         rotations, locations, hips, lift, lifted_frames = _sample(context, source, target, pairs, frames, corrections, translation_scale, ground=use_location and ground)
-        written, disabled = _write_curves(target, action, frames, rotations, locations if use_location else [], hips)
+        # 간소화를 끄지 않았을 때의 비교 기준. 모든 샘플 프레임에 키를 남겼을 경우의 개수다.
+        dense = len(frames) * (len(pairs) * 4 + (3 if use_location and hips else 0))
+        written, disabled, curve_error, curve_shift = _write_curves(
+            target, action, frames, rotations, locations if use_location else [], hips,
+            simplify=simplify, scale=target_height)
         action["catani_motion_source"] = source.name
         action["catani_motion_pairs"] = len(pairs)
         action.use_fake_user = True
@@ -481,8 +608,11 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
         context.view_layer.update()
         # 키가 놓인 프레임만 재면 프레임 간격을 넓혔을 때의 보간 오차를 놓친다.
         # 구간 전체에 고르게 흩은 프레임으로 사용자가 실제로 보는 값을 잰다.
+        # 간소화를 켜면 보간 구간이 곡선 전체로 퍼지므로 검증 프레임도 촘촘하게 잡는다.
         span = frames[-1] - frames[0]
-        samples = sorted({frames[0], frames[-1], *(frames[0] + round(span * index / 6) for index in range(1, 6))})
+        divisions = 12 if simplify > 0.0 else 6
+        samples = sorted({frames[0], frames[-1],
+                          *(frames[0] + round(span * index / divisions) for index in range(1, divisions))})
         error = verify(context, source, target, pairs, samples)
         floor_bones = [target_bone for slot, _source, target_bone in pairs if slot.startswith(("foot", "toe"))]
         rest_floor = _lowest_rest(target, target.matrix_world.copy(), floor_bones) if floor_bones else 0.0
@@ -495,6 +625,8 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
             "frame_start": frames[0], "frame_end": frames[-1], "frame_count": len(frames), "step": step,
             "source_profile": profile_label(source_key), "target_profile": profile_label(target_key),
             "target_bone_total": len(target.data.bones), "translation_scale": translation_scale,
+            "simplify": simplify, "dense_keyframes": dense,
+            "curve_error": curve_error, "curve_shift": curve_shift,
             "max_direction_error": error, "verified_frames": samples,
             "ground_lift": lift, "ground_frames": lifted_frames,
             "penetration": depth, "penetration_bone": deep_bone,
@@ -527,8 +659,18 @@ def format_report(asset, report):
         f"생성 키: {report['keyframes']:,}개",
         f"이동 배율: {report['translation_scale']:.3f}" if report["translation_scale"] else "이동 적용: 없음(회전만)",
         f"검증: {', '.join(str(frame) for frame in report['verified_frames'])} 프레임 최대 방향 오차 {report['max_direction_error']:.3f}°"
-        + (" · 키가 없는 프레임을 포함해 보간 오차까지 반영" if report["step"] > 1 else ""),
+        + (" · 키가 없는 프레임을 포함해 보간 오차까지 반영" if report["step"] > 1 or report["simplify"] else ""),
     ]
+    if report["simplify"]:
+        saved = 1.0 - report["keyframes"] / report["dense_keyframes"] if report["dense_keyframes"] else 0.0
+        lines.append(
+            f"곡선 간소화: 허용 오차 {report['simplify']:.2f}° · "
+            f"키 {report['dense_keyframes']:,} → {report['keyframes']:,}개({saved * 100:.0f}% 감소) · "
+            f"실측 회전 오차 최대 {report['curve_error']:.3f}°"
+            + (f" · 엉덩이 이동 오차 최대 {report['curve_shift']:.4f}" if report["curve_shift"] else "")
+        )
+    else:
+        lines.append("곡선 간소화: 없음 · 모든 프레임에 베지어 키")
     if report["ground_lift"] > 1e-6:
         lines.append(f"발 바닥 관통 보정: 최대 {report['ground_lift']:.3f} · {report['ground_frames']}프레임")
     if report["penetration"] > 0.02:

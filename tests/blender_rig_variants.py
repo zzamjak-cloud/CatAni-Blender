@@ -108,6 +108,8 @@ settings = bpy.context.scene.catani_settings
 settings.motion_library_path = str(library)
 settings.motion_query = "walk synthetic"
 settings.frame_step = 1
+# 이 검사의 대상은 본 이름 인식이므로, 곡선 간소화를 끄고 방향 오차를 그대로 잰다.
+settings.simplify_error = 0.0
 addon.refresh(bpy.context.scene)
 assert len(settings.motions) == 1, [item.name for item in settings.motions]
 

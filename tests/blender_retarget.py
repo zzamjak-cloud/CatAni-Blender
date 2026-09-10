@@ -45,6 +45,8 @@ assert len(settings.motions) == 1, [item.name for item in settings.motions]
 assert settings.motions[0].name == "합성 전신 걷기"
 settings.target_armature = target
 settings.frame_step = 1
+# 1~7번은 프레임마다 샘플값과 정확히 맞는지 보는 검사이므로 간소화를 끄고 잰다.
+settings.simplify_error = 0.0
 
 before = set(bpy.data.objects)
 assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
@@ -147,8 +149,49 @@ expected = len(range(1, span + 1, 4))
 assert counts == {expected}, (counts, expected, span)
 assert expected < span, (expected, span)
 assert f"간격 4" in settings.apply_report, settings.apply_report
+assert "곡선 간소화: 없음" in settings.apply_report, settings.apply_report
+
+# 8. 곡선 간소화를 켜면 키가 줄고 편집 가능한 베지어가 되며, 오차가 허용치 안에 머무는지.
+settings.frame_step = 1
+settings.simplify_error = math.radians(retarget.DEFAULT_SIMPLIFY)
+assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
+simplified_action = target.animation_data.action
+rotation_curves = [curve for layer in simplified_action.layers for strip in layer.strips
+                   for bag in strip.channelbags for curve in bag.fcurves
+                   if "rotation_quaternion" in curve.data_path]
+assert len(rotation_curves) == len(pairs) * 4, len(rotation_curves)
+simplified_keys = sum(len(curve.keyframe_points) for curve in rotation_curves)
+dense_keys = span * len(rotation_curves)
+assert simplified_keys < dense_keys * 0.5, f"키가 충분히 줄지 않았습니다: {simplified_keys} / {dense_keys}"
+assert all(key.interpolation == "BEZIER" for curve in rotation_curves for key in curve.keyframe_points)
+assert all(key.handle_left_type == "AUTO_CLAMPED" and key.handle_right_type == "AUTO_CLAMPED"
+           for curve in rotation_curves for key in curve.keyframe_points)
+# 한 부위의 쿼터니언 4채널은 키 위치가 같아야 중간 프레임에서 회전이 뒤틀리지 않는다.
+channel_frames = {}
+for curve in rotation_curves:
+    channel_frames.setdefault(curve.data_path, set()).add(tuple(round(key.co.x, 4) for key in curve.keyframe_points))
+mismatched = [path_name for path_name, keys in channel_frames.items() if len(keys) != 1]
+assert not mismatched, f"4채널 키 위치가 어긋난 부위: {mismatched}"
+worst_simplified = 0.0
+lowest_simplified = None
+for frame in range(scene.frame_start, scene.frame_end + 1):
+    scene.frame_set(frame)
+    bpy.context.view_layer.update()
+    for _slot, source_bone, target_bone in pairs:
+        gap = direction(source, source_bone).angle(direction(target, target_bone), 0.0)
+        worst_simplified = max(worst_simplified, math.degrees(gap))
+    for name in foot_bones:
+        matrix = target.matrix_world @ target.pose.bones[name].matrix
+        for point in (matrix.translation, matrix @ Vector((0.0, target.pose.bones[name].bone.length, 0.0))):
+            lowest_simplified = point.z if lowest_simplified is None else min(lowest_simplified, point.z)
+# 부위별 허용치는 0.25°지만 세계 방향 오차는 부모 체인을 따라 누적된다.
+assert worst_simplified < 3.0, f"간소화 후 방향 오차가 너무 큽니다: {worst_simplified:.3f}°"
+assert lowest_simplified >= rest_floor - 0.02, f"간소화가 발을 바닥 아래로 내렸습니다: {lowest_simplified:.4f} < {rest_floor:.4f}"
+assert f"곡선 간소화: 허용 오차 {retarget.DEFAULT_SIMPLIFY:.2f}°" in settings.apply_report, settings.apply_report
+assert "% 감소)" in settings.apply_report, settings.apply_report
 
 addon.unregister()
 addon.register()
 temporary.cleanup()
-print(f"CATANI_PASS 합성 CMU BVH 22부위 리타게팅·최대 방향 오차 {worst:.4f}°·접지·NLA/IK 차단·재적용·실패 경로")
+print(f"CATANI_PASS 합성 CMU BVH 22부위 리타게팅·최대 방향 오차 {worst:.4f}°·접지·NLA/IK 차단·재적용·실패 경로·"
+      f"간소화 키 {simplified_keys}/{dense_keys}개 방향 오차 {worst_simplified:.4f}°")
