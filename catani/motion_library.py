@@ -131,6 +131,20 @@ def make_asset(filepath, meta=None):
     )
 
 
+def read_length(path):
+    """BVH의 MOTION 머리글만 읽어 (프레임 수, fps)를 돌려준다. 표본을 읽지 않으므로 값이 싸다."""
+    frames, frame_time = 0, 0.0
+    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            lowered = line.strip().lower()
+            if lowered.startswith("frames:"):
+                frames = int(float(lowered.split(":", 1)[1]))
+            elif lowered.startswith("frame time:"):
+                frame_time = float(lowered.split(":", 1)[1])
+                break
+    return frames, (1.0 / frame_time if frame_time > 0 else 0.0)
+
+
 def scan_library(directory):
     """폴더의 BVH/FBX를 motions.json 정보와 합쳐 정렬된 목록으로 돌려준다."""
     root = Path(directory).expanduser().resolve()

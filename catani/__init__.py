@@ -5,22 +5,20 @@ from pathlib import Path
 import textwrap
 
 import bpy
-import bpy.utils.previews
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 
-from . import motion_preview, retarget
+from . import retarget
 from .motion_downloader import DownloadJob
 from .motion_import import import_asset
-from .motion_library import MotionAsset, browse, bundled_library_path, normalize_tags
+from .motion_library import MotionAsset, browse, bundled_library_path, normalize_tags, read_length
 from .source_catalog import CATEGORIES, get_source
 
 # {"download": DownloadJob, "scene": Scene, "apply": bool, "preview": bool, "path": str}
 _job = None
 
-# 표본 포즈 그림 캐시. {식별자: (파일 키, [icon_id, ...], MotionSketch)}
-_previews = None
-_sketches = {}
-_SKETCH_LIMIT = 6
+# 목록 길이 표시용 BVH 머리글 캐시. 패널은 자주 다시 그려지므로 mtime으로만 다시 읽는다.
+_lengths = {}
+_LIST_ROWS = 18  # 좁은 사이드바에서도 샘플을 한눈에 훑을 수 있는 최소 줄 수
 _CATEGORY_ITEMS = [("ALL", "전체 카테고리", "카테고리로 거르지 않습니다")] + [
     (key, label, f"{label} 모션만 봅니다") for key, label in sorted(CATEGORIES.items(), key=lambda pair: pair[1])
 ]
@@ -64,52 +62,6 @@ def _fill(item, asset):
     item.size_bytes = min(asset.size_bytes, 2**31 - 1)
     item.available = asset.available
     item.category = asset.category
-
-
-def _forget_sketch(identifier):
-    entry = _sketches.pop(identifier, None)
-    if entry is None or _previews is None:
-        return
-    for index in range(len(entry[1])):
-        name = f"{identifier}:{index}"
-        if name in _previews:
-            del _previews[name]
-
-
-def _sketch(item):
-    """선택 모션의 표본 포즈 아이콘과 메타 정보. 실패하면 (None, None, 사유)."""
-    if _previews is None:
-        return None, None, "미리보기 그림을 준비하지 못했습니다."
-    if not item.available or not item.path:
-        return None, None, "아직 받지 않은 모션입니다. 재생을 누르면 내려받은 뒤 그립니다."
-    if item.file_type != "bvh":
-        return None, None, "표본 포즈 그림은 BVH 모션만 지원합니다."
-    path = Path(bpy.path.abspath(item.path))
-    try:
-        key = (str(path), path.stat().st_mtime_ns)
-    except OSError:
-        return None, None, "모션 파일을 찾을 수 없습니다."
-    cached = _sketches.get(item.identifier)
-    if cached is not None and cached[0] == key:
-        return cached[1], cached[2], ""
-    _forget_sketch(item.identifier)
-    try:
-        motion = motion_preview.sketch(str(path))
-    except (ValueError, OSError, UnicodeDecodeError) as error:
-        return None, None, str(error)[:90]
-    while len(_sketches) >= _SKETCH_LIMIT:
-        _forget_sketch(next(iter(_sketches)))
-    icons = []
-    for index in range(len(motion.poses)):
-        name = f"{item.identifier}:{index}"
-        if name in _previews:
-            del _previews[name]
-        preview = _previews.new(name)
-        preview.image_size = (motion_preview.THUMB_SIZE, motion_preview.THUMB_SIZE)
-        preview.image_pixels_float = motion_preview.pixels(motion, index)
-        icons.append(preview.icon_id)
-    _sketches[item.identifier] = (key, icons, motion)
-    return icons, motion, ""
 
 
 def refresh(scene, keep=""):
@@ -623,9 +575,30 @@ class CATANI_OT_preview_clear(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def _duration_line(item, motion):
-    """받은 파일은 실제 표본에서, 아직 안 받은 모션은 카탈로그에서 길이를 읽는다."""
-    frames, fps = (motion.frames, motion.fps) if motion is not None else (0, 0.0)
+def _cached_length(path):
+    """패널 draw마다 파일을 다시 열지 않도록 mtime 기준으로 (프레임 수, fps)를 기억한다."""
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return 0, 0.0
+    cached = _lengths.get(str(path))
+    if cached is not None and cached[0] == stamp:
+        return cached[1], cached[2]
+    try:
+        frames, fps = read_length(path)
+    except (OSError, ValueError, UnicodeDecodeError):
+        frames, fps = 0, 0.0
+    if len(_lengths) > 64:
+        _lengths.clear()
+    _lengths[str(path)] = (stamp, frames, fps)
+    return frames, fps
+
+
+def _duration_line(item):
+    """받은 파일은 BVH 머리글에서, 아직 안 받은 모션은 카탈로그에서 길이를 읽는다."""
+    frames, fps = 0, 0.0
+    if item.available and item.path and item.file_type == "bvh":
+        frames, fps = _cached_length(Path(bpy.path.abspath(item.path)))
     if not frames and item.source_id:
         try:
             entry = get_source(item.source_id)
@@ -636,73 +609,6 @@ def _duration_line(item, motion):
     if not frames:
         return ""
     return f"{frames:,}프레임 · 약 {frames / fps:.1f}초 · {fps:.0f} fps" if fps else f"{frames:,}프레임"
-
-
-class CATANI_OT_motion_browser(bpy.types.Operator):
-    bl_idname = "catani.motion_browser"
-    bl_label = "모션 샘플 보기"
-    bl_description = "넓은 창에서 모션을 검색하고 표본 포즈로 확인한 뒤 대상 아마추어에 적용합니다"
-
-    def invoke(self, context, _event):
-        refresh(context.scene)
-        return context.window_manager.invoke_props_dialog(self, width=1080, title="CatAni · 모션 샘플", confirm_text="적용하기")
-
-    def draw(self, context):
-        _draw_browser(self.layout, context.scene.catani_settings)
-
-    def execute(self, context):
-        if not CATANI_OT_motion_apply.poll(context):
-            self.report({"WARNING"}, "다운로드가 끝난 뒤 적용하세요.")
-            return {"CANCELLED"}
-        return bpy.ops.catani.motion_apply("EXEC_DEFAULT")
-
-
-def _draw_browser(layout, settings):
-    header = layout.row(align=True)
-    header.prop(settings, "motion_query", text="", icon="VIEWZOOM")
-    header.prop(settings, "motion_category", text="")
-    header.prop(settings, "local_only", toggle=True)
-    header.operator("catani.motion_refresh", text="", icon="FILE_REFRESH")
-    body = layout.split(factor=0.34)
-    listing = body.column()
-    listing.template_list("CATANI_UL_motions", "catani_browser", settings, "motions", settings, "motion_active", rows=16)
-    listing.label(text=settings.motion_status[:60], icon="INFO")
-    _draw_detail(body.column(), settings)
-
-
-def _draw_detail(layout, settings):
-    """선택한 모션의 표본 포즈와 정보, 재생·대상 지정을 담는다."""
-    try:
-        item = _selected(settings)
-    except ValueError as error:
-        layout.label(text=str(error), icon="ERROR")
-        return
-    layout.label(text=item.name, icon="ARMATURE_DATA" if item.available else "IMPORT")
-    icons, motion, note = _sketch(item)
-    strip = layout.box()
-    if icons:
-        row = strip.row(align=True)
-        for icon in icons:
-            row.template_icon(icon_value=icon, scale=5.0)
-        strip.label(text="시간 순서로 뽑은 표본 포즈 · 흐린 선은 직전 포즈")
-    else:
-        strip.label(text=note, icon="INFO")
-    info = layout.column(align=True)
-    info.label(text=f"형식 {item.file_type.upper()} · {item.size_bytes / 1024:.0f} KB · 카테고리 {CATEGORIES.get(item.category, item.category or '없음')}")
-    length = _duration_line(item, motion)
-    if length:
-        info.label(text=length)
-    info.label(text=f"태그 {item.tags or '없음'}")
-    _lines(info, item.description or "설명 없음", 72)
-    layout.prop(settings, "target_armature", text="대상")
-    row = layout.row(align=True)
-    row.scale_y = 1.4
-    if item.available:
-        row.operator("catani.motion_preview", text="뷰포트에서 재생", icon="PLAY")
-    else:
-        row.operator("catani.motion_preview", text=f"받아서 재생 · {item.size_bytes / 1024:.0f}KB", icon="IMPORT")
-    row.operator("catani.motion_info", text="출처", icon="INFO")
-    layout.label(text="[적용하기]를 누르면 대상 아마추어에 굽습니다.", icon="CHECKMARK")
 
 
 class CATANI_OT_motion_download(bpy.types.Operator):
@@ -836,16 +742,37 @@ class CATANI_PT_main(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.catani_settings
-        browse_row = layout.row()
-        browse_row.scale_y = 1.6
-        browse_row.operator("catani.motion_browser", text="모션 샘플 보기", icon="VIEWZOOM")
-        chosen = settings.motions[settings.motion_active] if 0 <= settings.motion_active < len(settings.motions) else None
-        layout.label(text=chosen.name if chosen else "선택한 모션 없음",
-                     icon="ARMATURE_DATA" if chosen and chosen.available else "IMPORT")
+        search = layout.row(align=True)
+        search.prop(settings, "motion_query", text="", icon="VIEWZOOM")
+        search.operator("catani.motion_refresh", text="", icon="FILE_REFRESH")
+        filters = layout.row(align=True)
+        filters.prop(settings, "motion_category", text="")
+        filters.prop(settings, "local_only", toggle=True)
+        layout.template_list("CATANI_UL_motions", "catani_main", settings, "motions",
+                             settings, "motion_active", rows=_LIST_ROWS)
+        try:
+            chosen = _selected(settings)
+        except ValueError as error:
+            chosen = None
+            layout.label(text=str(error), icon="INFO")
+        else:
+            info = layout.column(align=True)
+            info.label(text=chosen.name, icon="ARMATURE_DATA" if chosen.available else "IMPORT")
+            info.label(text=f"{chosen.file_type.upper()} · {chosen.size_bytes / 1024:.0f}KB · "
+                            f"{CATEGORIES.get(chosen.category, chosen.category or '없음')}")
+            length = _duration_line(chosen)
+            if length:
+                info.label(text=length)
         layout.prop(settings, "target_armature", text="대상")
+        row = layout.row(align=True)
+        if chosen is not None and not chosen.available:
+            row.operator("catani.motion_preview", text=f"받아서 재생 · {chosen.size_bytes / 1024:.0f}KB", icon="IMPORT")
+        else:
+            row.operator("catani.motion_preview", text="뷰포트에서 재생", icon="PLAY")
+        row.operator("catani.motion_info", text="출처", icon="INFO")
         button = layout.row()
         button.scale_y = 1.6
-        button.operator("catani.motion_apply", text="적용", icon="PLAY")
+        button.operator("catani.motion_apply", text="적용", icon="CHECKMARK")
         if settings.preview_active:
             preview = layout.box()
             preview.label(text=f"미리보기 재생 중 · {settings.preview_name}"[:44], icon="HIDE_OFF")
@@ -854,15 +781,13 @@ class CATANI_PT_main(bpy.types.Panel):
             layout.progress(factor=settings.download_progress, text=settings.download_status[:48])
             layout.operator("catani.download_cancel", icon="X")
         _lines(layout, settings.motion_status)
-        row = layout.row(align=True)
-        row.operator("catani.motion_info", text="출처", icon="INFO")
-        row.operator("catani.settings", text="상세", icon="PREFERENCES")
+        layout.operator("catani.settings", text="상세 설정", icon="PREFERENCES")
 
 
 _classes = (
     CatAniMotionItem, CatAniSettings, CATANI_UL_motions,
     CATANI_OT_motion_refresh, CATANI_OT_motion_apply, CATANI_OT_motion_import,
-    CATANI_OT_motion_preview, CATANI_OT_preview_clear, CATANI_OT_motion_browser,
+    CATANI_OT_motion_preview, CATANI_OT_preview_clear,
     CATANI_OT_motion_download, CATANI_OT_download_cancel,
     CATANI_OT_motion_info, CATANI_OT_settings,
     CATANI_PT_main,
@@ -875,11 +800,7 @@ _handlers = (
 
 
 def register():
-    global _previews
-    if _previews is not None:
-        bpy.utils.previews.remove(_previews)
-    _sketches.clear()
-    _previews = bpy.utils.previews.new()
+    _lengths.clear()
     for cls in _classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.catani_settings = PointerProperty(type=CatAniSettings)
@@ -889,12 +810,8 @@ def register():
 
 
 def unregister():
-    global _previews
     _stop_download()
-    _sketches.clear()
-    if _previews is not None:
-        bpy.utils.previews.remove(_previews)
-        _previews = None
+    _lengths.clear()
     if bpy.app.timers.is_registered(_refresh_all):
         bpy.app.timers.unregister(_refresh_all)
     for handlers, callback in _handlers:

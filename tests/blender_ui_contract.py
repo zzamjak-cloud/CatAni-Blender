@@ -1,4 +1,4 @@
-"""주 패널은 목록 열기·대상·적용만 남고, 검색·표본 포즈·상세는 팝업에만 있는지 검사한다."""
+"""주 패널이 검색·목록·적용을 담고 상세 설정과 출처만 팝업에 남는지 검사한다."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,23 +74,25 @@ for name in ("prompt", "codex_path", "plan_json", "agent_status", "motion_index_
     assert name not in settings.bl_rna.properties, f"제거된 입력이 남았습니다: {name}"
 
 main = record(addon.CATANI_PT_main.draw, bpy.context)
-# 주 흐름: 모션 샘플 보기(팝업) → 대상 → 적용. 좁은 사이드바에는 목록을 두지 않는다.
-assert main["lists"] == [], main["lists"]
-assert "catani.motion_browser" in main["operators"], main["operators"]
-assert main["properties"] == ["target_armature"], main["properties"]
-assert "catani.motion_apply" in main["operators"], main["operators"]
+# 주 흐름: 검색 → 목록에서 고르기 → 대상 → 적용. 목록은 사이드바에서 바로 보인다.
+assert main["lists"] == [("CATANI_UL_motions", "motions")], main["lists"]
+assert addon._LIST_ROWS >= 16, addon._LIST_ROWS
+assert {"motion_query", "motion_category", "local_only", "target_armature"} <= set(main["properties"]), main["properties"]
+assert {"catani.motion_apply", "catani.motion_preview", "catani.motion_refresh"} <= set(main["operators"]), main["operators"]
 assert main["operators"].count("catani.motion_apply") == 1
-# 복잡한 정보와 설정은 주 패널에 없어야 한다.
-for hidden in ("motion_query", "motion_category", "local_only", "motion_library_path", "frame_step", "use_location", "hide_source"):
+# 폴더·굽기 옵션 같은 상세 설정과 받기 전용 경로는 주 패널에 없어야 한다.
+for hidden in ("motion_library_path", "frame_step", "smooth_window", "simplify_error", "use_location", "hide_source"):
     assert hidden not in main["properties"], f"상세 설정이 주 패널에 노출되었습니다: {hidden}"
-for hidden in ("catani.motion_download", "catani.motion_import", "catani.motion_refresh", "wm.url_open"):
+for hidden in ("catani.motion_download", "catani.motion_import", "wm.url_open"):
     assert hidden not in main["operators"], f"보조 동작이 주 패널에 노출되었습니다: {hidden}"
+# 표본 포즈 그림은 제거했다. 목록 높이를 아이콘에 내주지 않는다.
+assert main["icons"] == [], main["icons"]
+assert bpy.types.Operator.bl_rna_get_subclass_py("CATANI_OT_motion_browser") is None, "제거한 팝업 연산자가 남았습니다"
 joined = " ".join(main["labels"])
 for entry in CATALOG:
     assert entry.license_note not in joined, "이용 조건 원문이 주 패널에 노출되었습니다"
     assert entry.source_name not in joined, "출처 문구가 주 패널에 노출되었습니다"
 assert {"catani.motion_info", "catani.settings"} <= set(main["operators"]), main["operators"]
-assert len(main["properties"]) + len(main["operators"]) <= 6, "주 패널 요소가 너무 많습니다"
 
 # 출처 팝업이 실제 다운로드 주소와 이용 조건, 원문 링크를 담는지.
 settings.motion_library_path = ""
@@ -116,54 +118,35 @@ assert {"motion_library_path", "frame_step", "use_location", "hide_source"} <= s
 assert {"catani.motion_refresh", "catani.motion_download", "catani.motion_import"} <= set(detail["operators"]), detail["operators"]
 assert any("적용 리포트" in label for label in detail["labels"]), detail["labels"]
 
-# 모션 샘플 팝업: 넓은 목록과 검색·필터, 미리보기 재생, 대상 지정이 한 창에 모인다.
-browser = record(addon.CATANI_OT_motion_browser.draw, bpy.context)
-assert browser["lists"] == [("CATANI_UL_motions", "motions")], browser["lists"]
-assert {"motion_query", "motion_category", "local_only", "target_armature"} <= set(browser["properties"]), browser["properties"]
-assert {"catani.motion_preview", "catani.motion_refresh", "catani.motion_info"} <= set(browser["operators"]), browser["operators"]
-# 아직 받지 않은 모션은 그림 대신 안내만 나온다.
-assert not settings.motions[settings.motion_active].available
-assert browser["icons"] == [], browser["icons"]
-
-# 받아 둔 BVH는 표본 포즈 그림을 만들어 팝업에 건다.
+# 받아 둔 BVH는 머리글만 읽어 길이를 표시한다. 표본 프레임은 읽지 않는다.
 temporary = tempfile.TemporaryDirectory(prefix="catani-ui-contract-")
 library = Path(temporary.name)
 (library / "wave.bvh").write_text("""HIERARCHY
 ROOT Hips
 {
     OFFSET 0.00 0.00 0.00
-    CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation
-    JOINT Spine
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    End Site
     {
         OFFSET 0.00 4.00 0.00
-        CHANNELS 3 Zrotation Xrotation Yrotation
-        End Site
-        {
-            OFFSET 0.00 4.00 0.00
-        }
     }
 }
 MOTION
-Frames: 3
+Frames: 120
 Frame Time: 0.0416667
-0.00 12.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00
-0.00 12.00 0.00 0.00 0.00 0.00 -25.00 0.00 0.00
-0.00 12.00 0.00 0.00 0.00 0.00 -45.00 0.00 0.00
-""", encoding="utf-8")
+""" + "0.00 0.00 0.00\n" * 120, encoding="utf-8")
 settings.motion_library_path = str(library)
 settings.local_only = True
 addon.refresh(bpy.context.scene)
 assert len(settings.motions) == 1, [item.name for item in settings.motions]
 settings.motion_active = 0
-browser = record(addon.CATANI_OT_motion_browser.draw, bpy.context)
-assert len(browser["icons"]) == 3, browser["icons"]
-# --background에서는 아이콘 ID가 발급되지 않으므로 그림 자체를 확인한다.
-preview = addon._previews[f"{settings.motions[0].identifier}:0"]
-assert tuple(preview.image_size) == (addon.motion_preview.THUMB_SIZE,) * 2, tuple(preview.image_size)
-assert any(list(preview.image_pixels_float)[3::4]), "표본 포즈 그림이 비었습니다"
+assert addon._duration_line(settings.motions[0]) == "120프레임 · 약 5.0초 · 24 fps", addon._duration_line(settings.motions[0])
+local = record(addon.CATANI_PT_main.draw, bpy.context)
+assert any("5.0초" in label for label in local["labels"]), local["labels"]
 settings.local_only = False
 settings.motion_library_path = ""
+temporary.cleanup()
 
 addon.unregister()
 addon.register()
-print("CATANI_PASS 주 패널 단순화·모션 샘플 팝업·표본 포즈·재등록")
+print("CATANI_PASS 사이드바 목록·검색·길이 표시·상세/출처 팝업·재등록")

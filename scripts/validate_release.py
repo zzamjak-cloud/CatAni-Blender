@@ -13,7 +13,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_FILES = (
     "__init__.py", "motion_library.py", "motion_import.py",
-    "motion_preview.py", "source_catalog.py", "motion_downloader.py", "retarget.py", "motion_catalog.json",
+    "source_catalog.py", "motion_downloader.py", "retarget.py", "motion_catalog.json",
     "blender_manifest.toml",
 )
 
