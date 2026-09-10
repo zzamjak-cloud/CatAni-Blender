@@ -217,14 +217,25 @@ settings.motion_query = ""
 addon.refresh(bpy.context.scene)
 settings.motion_active = next(index for index, item in enumerate(settings.motions) if item.source_id == entry.id)
 identifier = settings.motions[settings.motion_active].identifier
-assert bpy.ops.catani.motion_rename(new_name="  내가 고른   걷기  ") == {"FINISHED"}, settings.motion_status
+assert bpy.ops.catani.motion_rename(new_name="  내가 고른   걷기  ", new_category="jump") == {"FINISHED"}, settings.motion_status
 renamed = settings.motions[settings.motion_active]
 assert renamed.identifier == identifier, "이름을 바꾼 뒤 선택이 옮겨갔습니다"
 assert renamed.name == "내가 고른 걷기", renamed.name
+assert renamed.category == "jump", renamed.category
 assert renamed.source_id == entry.id, "이름만 바꿨는데 출처가 사라졌습니다"
-assert json.loads((download_directory / "motions.json").read_text(encoding="utf-8"))["motions"][0]["name"] == "내가 고른 걷기"
+recorded = json.loads((download_directory / "motions.json").read_text(encoding="utf-8"))["motions"][0]
+assert recorded["name"] == "내가 고른 걷기" and recorded["category"] == "jump", recorded
 addon.refresh(bpy.context.scene)
 assert settings.motions[settings.motion_active].name == "내가 고른 걷기", "다시 읽었을 때 이름이 사라졌습니다"
+assert settings.motions[settings.motion_active].category == "jump", "다시 읽었을 때 분류가 사라졌습니다"
+# 카테고리 필터가 켜져 있으면 바꾼 분류를 따라가 항목이 사라지지 않는다.
+settings.motion_category = "jump"
+addon.refresh(bpy.context.scene)
+assert any(item.identifier == identifier for item in settings.motions), "필터가 항목을 잃었습니다"
+assert bpy.ops.catani.motion_rename(new_name="내가 고른 걷기", new_category="run") == {"FINISHED"}, settings.motion_status
+assert settings.motion_category == "run", settings.motion_category
+assert any(item.identifier == identifier for item in settings.motions), "분류를 바꾼 뒤 항목이 사라졌습니다"
+settings.motion_category = "ALL"
 expect_cancelled(bpy.ops.catani.motion_rename, new_name="   ")
 # 아직 받지 않은 모션은 적어 둘 파일이 없으므로 버튼이 잠긴다.
 settings.local_only = False

@@ -36,7 +36,7 @@ CMU_SOURCE = {
 # 상한은 source_catalog.MAX_FILE_BYTES(32MB) 안에 둔다.
 MIN_BYTES = 60_000
 MAX_BYTES = 12_000_000
-PER_CATEGORY = 400
+PER_CATEGORY = 600
 
 # (분류 키, 한국어 이름, 태그, 포함 키워드, 제외 키워드)
 # 설명 한 줄에 여러 동작이 섞여 있으므로 특이한 동작을 먼저 판정하고
@@ -94,6 +94,10 @@ CATEGORIES = (
     # 설명이 있는 동작을 버리지 않기 위한 마지막 묶음. 위에서 하나도 안 걸리면 여기로 온다.
     ("misc", "기타", ("기타", "misc"), (r"\S",), ()),
 )
+
+# 설명이 아예 없거나 `Unknown`·`clean`뿐인 항목이 들어가는 자리. 이름을 만들 수
+# 없으므로 애드온에서 직접 이름과 분류를 지정해 쓴다.
+UNKNOWN = ("unknown", "미분류", ("미분류", "unknown"))
 
 
 # 의미 없는 인덱스 항목. `clean`은 정리 여부 표시일 뿐 동작 설명이 아니다.
@@ -168,7 +172,8 @@ def motion_header(url):
         try:
             text = request_head(url, length)
         except Exception:
-            return 0, 0.0
+            # 병렬 조회 중 한 번 실패한 것일 수 있으므로 포기하지 않고 다시 시도한다.
+            continue
         frames = re.search(r"^\s*Frames:\s*(\d+)", text, re.MULTILINE)
         interval = re.search(r"^\s*Frame Time:\s*([0-9.eE+-]+)", text, re.MULTILINE)
         if frames and interval:
@@ -189,21 +194,24 @@ def collect(verbose=True):
         subject, _, trial = Path(item["path"]).stem.partition("_")
         blobs[f"{int(subject)}_{trial}"] = item
 
-    buckets = {key: [] for key, *_ in CATEGORIES}
-    for key in sorted(descriptions, key=lambda item: (-int(item.split("_")[0]), item)):
-        blob = blobs.get(key)
-        description = descriptions[key].strip()
-        if blob is None or not MIN_BYTES <= blob["size"] <= MAX_BYTES or BAD_DESCRIPTION.match(description):
+    buckets = {key: [] for key, *_ in (*CATEGORIES, UNKNOWN)}
+    for key in sorted(blobs, key=lambda item: (-int(item.split("_")[0]), item)):
+        blob = blobs[key]
+        description = descriptions.get(key, "").strip()
+        if not MIN_BYTES <= blob["size"] <= MAX_BYTES:
             continue
-        matched = classify(description)
+        matched = None if not description or BAD_DESCRIPTION.match(description) else classify(description)
         if matched is None:
-            continue
-        category, korean, tags = matched
+            # 이름을 지을 근거가 없으므로 설명을 비우고 미분류로 넘긴다.
+            category, korean, tags = UNKNOWN
+            description = ""
+        else:
+            category, korean, tags = matched
         if len(buckets[category]) >= PER_CATEGORY:
             continue
         buckets[category].append((key, description, blob, korean, tags))
 
-    selected = [(key, *entry) for key, *_ in CATEGORIES for entry in buckets[key]]
+    selected = [(key, *entry) for key, *_ in (*CATEGORIES, UNKNOWN) for entry in buckets[key]]
     # 항목마다 Range 요청 한 번이 필요하다. 순차 조회는 2,000건에서 20분을 넘기므로 함께 던진다.
     with ThreadPoolExecutor(max_workers=8) as pool:
         headers = list(pool.map(lambda entry: motion_header(f"{CMU_RAW}/{entry[3]['path']}"), selected))
@@ -211,8 +219,8 @@ def collect(verbose=True):
     motions = []
     for (key, trial, description, blob, korean, tags), (frames, fps) in zip(selected, headers):
         seconds = frames / fps if frames and fps else 0.0
-        short = re.sub(r"\s+", " ", description)[:40].strip(" ,-")
-        detail = f"CMU {trial} · {short}"
+        short = re.sub(r"\s+", " ", description)[:40].strip(" ,-") or f"CMU {trial}"
+        detail = f"CMU {trial} · {short}" if description else f"CMU {trial} · 설명 없음 · 이름과 분류를 직접 지정하세요"
         if seconds:
             detail += f" · {frames}프레임 / 약 {seconds:.1f}초"
         motions.append({
@@ -220,7 +228,7 @@ def collect(verbose=True):
             "source": "cmu",
             "category": key,
             "name": f"{korean} · {short}"[:44],
-            "tags": sorted({*tags, *re.split(r"[^a-z]+", description.lower())} - {""}, key=str),
+            "tags": sorted({*tags, trial, *re.split(r"[^a-z]+", description.lower())} - {""}, key=str),
             "description": detail,
             "remote_path": blob["path"],
             "local_path": f"CMU/{Path(blob['path']).name}",
@@ -246,7 +254,7 @@ def main():
         "schema_version": 1,
         "generated_by": "scripts/build_catalog.py",
         "sources": {"cmu": CMU_SOURCE},
-        "categories": {key: korean for key, korean, *_ in CATEGORIES},
+        "categories": {key: korean for key, korean, *_ in (*CATEGORIES, UNKNOWN)},
         "motions": motions,
     }
     path = Path(args.output)

@@ -20,9 +20,12 @@ _job = None
 # 목록 길이 표시용 BVH 머리글 캐시. 패널은 자주 다시 그려지므로 mtime으로만 다시 읽는다.
 _lengths = {}
 _LIST_ROWS = 18  # 좁은 사이드바에서도 샘플을 한눈에 훑을 수 있는 최소 줄 수
+_EDIT_CATEGORY_ITEMS = [(key, label, f"{label}로 분류합니다")
+                        for key, label in sorted(CATEGORIES.items(), key=lambda pair: pair[1])]
 _CATEGORY_ITEMS = [("ALL", "전체 카테고리", "카테고리로 거르지 않습니다")] + [
     (key, label, f"{label} 모션만 봅니다") for key, label in sorted(CATEGORIES.items(), key=lambda pair: pair[1])
 ]
+_FALLBACK_CATEGORY = next((key for key, *_ in _EDIT_CATEGORY_ITEMS if key == "misc"), _EDIT_CATEGORY_ITEMS[0][0])
 
 
 def user_library_path():
@@ -684,10 +687,11 @@ class CATANI_OT_download_cancel(bpy.types.Operator):
 
 class CATANI_OT_motion_rename(bpy.types.Operator):
     bl_idname = "catani.motion_rename"
-    bl_label = "이름 바꾸기"
-    bl_description = "목록에 보일 이름을 바꿔 모션 폴더의 motions.json에 저장합니다"
+    bl_label = "이름·분류 바꾸기"
+    bl_description = "목록에 보일 이름과 분류를 바꿔 모션 폴더의 motions.json에 저장합니다"
 
     new_name: StringProperty(name="이름", default="")
+    new_category: EnumProperty(name="분류", items=_EDIT_CATEGORY_ITEMS, default=_FALLBACK_CATEGORY)
 
     @classmethod
     def poll(cls, context):
@@ -695,12 +699,16 @@ class CATANI_OT_motion_rename(bpy.types.Operator):
         return _job is None and 0 <= settings.motion_active < len(settings.motions) and settings.motions[settings.motion_active].available
 
     def invoke(self, context, _event):
-        self.new_name = _selected(context.scene.catani_settings).name
+        item = _selected(context.scene.catani_settings)
+        self.new_name = item.name
+        known = {key for key, *_ in _EDIT_CATEGORY_ITEMS}
+        self.new_category = item.category if item.category in known else _FALLBACK_CATEGORY
         return context.window_manager.invoke_props_dialog(self, width=460)
 
     def draw(self, _context):
         layout = self.layout
         layout.prop(self, "new_name", text="")
+        layout.prop(self, "new_category", text="분류")
         layout.label(text="모션 폴더의 motions.json에 적어 두므로 다음에 열어도 유지됩니다.", icon="INFO")
 
     def execute(self, context):
@@ -713,13 +721,21 @@ class CATANI_OT_motion_rename(bpy.types.Operator):
             item = _selected(settings)
             identifier = item.identifier
             library, relative = _library_slot(settings, item)
-            update_manifest(library, relative, {"name": title})
+            update_manifest(library, relative, {"name": title, "category": self.new_category})
         except (ValueError, OSError) as error:
             self.report({"ERROR"}, str(error)[:250])
             settings.motion_status = str(error)[:250]
             return {"CANCELLED"}
         refresh(context.scene, keep=identifier)
-        settings.motion_status = f"이름을 바꿨습니다: {title}"
+        label = CATEGORIES.get(self.new_category, self.new_category)
+        note = ""
+        # 카테고리 필터가 켜져 있으면 방금 옮긴 항목이 목록에서 빠진다. 필터를 따라 옮긴다.
+        if not any(entry.identifier == identifier for entry in settings.motions):
+            if settings.motion_category not in ("ALL", self.new_category):
+                settings.motion_category = self.new_category
+                note = " · 카테고리 필터를 옮겼습니다"
+            refresh(context.scene, keep=identifier)
+        settings.motion_status = f"이름을 바꿨습니다: {title} · 분류 {label}{note}"
         _redraw()
         return {"FINISHED"}
 

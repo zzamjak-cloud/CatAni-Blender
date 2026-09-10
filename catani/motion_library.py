@@ -179,12 +179,15 @@ def make_asset(filepath, meta=None, relative=""):
     tags = normalize_tags(meta.get("tags", ()))
     if not tags and source is not None:
         tags = normalize_tags(source.tags)
+    category = meta.get("category", "")
+    if not isinstance(category, str):
+        raise ValueError("모션 category는 문자열이어야 합니다.")
     return MotionAsset(
         identifier=hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:20],
         name=title, path=str(path), file_type=extension[1:],
         tags=tags or normalize_tags(title),
         source_id=source.id if source else "", size_bytes=path.stat().st_size,
-        available=True, category=source.category if source else "", **text,
+        available=True, category=category.strip() or (source.category if source else ""), **text,
     )
 
 
