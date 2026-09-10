@@ -44,12 +44,14 @@ def validate(root=ROOT, tag=None):
     ps_text = powershell.decode("utf-8-sig")
     bat_text = (root / "scripts/dev_run.bat").read_bytes().decode("ascii")
     shell_text = (root / "scripts/dev_run.sh").read_text(encoding="utf-8")
-    for token in ("@args", "ReparsePoint", "BLENDER_USER_RESOURCES", "--python-exit-code 1", "finally"):
+    for token in ("@args", "ReparsePoint", "BLENDER_USER_RESOURCES", "--python-exit-code 1", "finally",
+                  "blender_version_min", "Find-BlenderInstall", "OutputEncoding"):
         if token not in ps_text:
             raise ValueError(f"Windows 실행기 계약 누락: {token}")
     if "%*" not in bat_text or "%errorlevel%" not in bat_text.lower():
         raise ValueError("BAT 인자 또는 종료 코드 전달이 없습니다.")
-    for token in ('"$@"', "BLENDER_USER_RESOURCES", "--python-exit-code 1"):
+    for token in ('"$@"', "BLENDER_USER_RESOURCES", "--python-exit-code 1",
+                  "blender_version_min", "find_blender"):
         if token not in shell_text:
             raise ValueError(f"셸 실행기 계약 누락: {token}")
     readme = (root / "README.md").read_text(encoding="utf-8")

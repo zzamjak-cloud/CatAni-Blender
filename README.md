@@ -120,9 +120,11 @@ CMU 데이터는 연구와 상업 제품에 사용할 수 있으나, 변환본�
 
 소스는 `catani/`에 있으며 매니페스트 ID는 `catani`입니다. 실행기는 저장소 소스를 격리된 프로필의 `extensions/user_default/catani`에 연결합니다. 일반 Blender 설정이나 설치된 릴리스에는 연결하지 않습니다. ZIP을 다시 설치할 필요 없이 실행기를 통해 Blender를 재시작하면 수정한 소스를 읽습니다.
 
+`BLENDER_BINARY`를 설정하지 않으면 실행기가 PATH와 흔한 설치 위치(Windows: `Program Files\Blender Foundation`, `%LOCALAPPDATA%\Programs`, Steam, 각 고정 드라이브의 상단·`Tools`·`Apps`·`Programs`·`Program Files` 아래 `Blender*` 폴더 / macOS: `/Applications`, `~/Applications`, `/opt`, Homebrew)를 훑어 Blender를 스스로 찾습니다. **폴더 이름이 아니라 `--version` 출력으로 실제 버전을 확인하고, 매니페스트의 `blender_version_min`을 만족하는 가장 높은 버전을 고릅니다.** 4.3과 5.2가 함께 깔린 환경에서 낮은 버전이 먼저 잡혀 애드온이 로드되지 않는 일을 막기 위한 것입니다. `BLENDER_BINARY`를 지정하면 그 경로를 그대로 쓰고, 최소 버전보다 낮으면 경고만 합니다. 최소 버전을 만족하는 설치가 없으면 찾은 설치와 버전을 함께 알립니다. `scripts/run_tests.py`와 `scripts/package.py`도 같은 순서로 찾으므로 `--blender` 없이 실행할 수 있습니다.
+
 ### macOS
 
-개발 기준은 Blender 5.2이며 기본 실행 파일은 `/Applications/Blender.app/Contents/MacOS/Blender`입니다. 저장소 루트에서 실행합니다.
+개발 기준은 Blender 5.2입니다. 저장소 루트에서 실행하면 실행 파일을 스스로 찾습니다.
 
 ```bash
 bash scripts/dev_run.sh
@@ -130,26 +132,33 @@ bash scripts/dev_run.sh Blender/Player_Animation_01.blend
 BLENDER_BINARY=/Applications/Blender.app/Contents/MacOS/Blender bash scripts/dev_run.sh --background --python-expr 'import bpy; print(bpy.app.version_string)'
 ```
 
+경로를 직접 지정할 때만 `BLENDER_BINARY`를 씁니다.
+
 프로필: `~/Library/Application Support/Blender/CatAniDev/<Blender 주.부 버전>/`.
 
 ### Windows
 
-PowerShell에서 실행 파일 경로를 설정합니다. `blender.exe`가 PATH에 있으면 설정을 생략할 수 있습니다.
+PowerShell에서 그대로 실행하면 실행 파일을 스스로 찾고, 고른 경로와 버전을 첫 줄에 출력합니다.
 
 ```powershell
-$env:BLENDER_BINARY = 'C:\Blender\blender.exe'
 .\scripts\dev_run.ps1
 .\scripts\dev_run.ps1 --background --python-expr 'import bpy; print(bpy.app.version_string)'
+```
+
+자동 감지가 원하는 설치를 고르지 않을 때만 경로를 지정합니다.
+
+```powershell
+$env:BLENDER_BINARY = 'D:\Tools\Blender-5.2\blender.exe'
+.\scripts\dev_run.ps1
 ```
 
 명령 프롬프트에서는 `scripts\dev_run.bat`을 사용합니다. 추가 Blender 인자와 종료 코드를 전달합니다.
 
 ```bat
-set "BLENDER_BINARY=C:\Blender\blender.exe"
 scripts\dev_run.bat --background --python-expr "import bpy; print(bpy.app.version_string)"
 ```
 
-프로필: `<프로젝트>/.blender-dev/CatAniDev/<Blender 주.부 버전>/`. 연결할 자리에 일반 파일이나 디렉터리가 있으면 보호를 위해 실행을 중단합니다. Windows PowerShell 스크립트는 한국어 메시지 호환을 위해 UTF-8 BOM을 사용합니다. Windows 실제 실행은 별도 검증이 필요합니다.
+프로필: `<프로젝트>/.blender-dev/CatAniDev/<Blender 주.부 버전>/`. 연결할 자리에 일반 파일이나 디렉터리가 있으면 보호를 위해 실행을 중단합니다. Windows PowerShell 스크립트는 한국어 메시지 호환을 위해 UTF-8 BOM을 사용하고, 파이프·리다이렉트에서도 깨지지 않도록 출력 인코딩을 UTF-8로 맞춥니다. Windows 실제 실행은 별도 검증이 필요합니다.
 
 ## 로컬 검증
 
@@ -215,7 +224,7 @@ python3 scripts/run_tests.py
 python3 scripts/package.py --tag v0.5.1
 ```
 
-Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는 `BLENDER_BINARY` 또는 각 실행 명령의 `--blender`로 지정합니다. 전체 검사기는 임시 복사본과 독립 프로필에서 실행하므로 기존 개발 결과를 덮어쓰지 않습니다. 실제 CMU 다운로드는 기본 검사에 포함하지 않습니다.
+Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는 자동 감지되며, 원하는 설치를 고르지 않을 때만 `BLENDER_BINARY` 또는 각 실행 명령의 `--blender`로 지정합니다. 전체 검사기는 임시 복사본과 독립 프로필에서 실행하므로 기존 개발 결과를 덮어쓰지 않습니다. 실제 CMU 다운로드는 기본 검사에 포함하지 않습니다.
 
 `dist/catani-v0.5.1.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스와 기본 데모 BVH만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 다운로드된 CMU 모션 파일은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
 

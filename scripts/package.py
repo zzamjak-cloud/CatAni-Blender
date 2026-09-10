@@ -5,9 +5,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import string
 import subprocess
 import tempfile
+import tomllib
 import zipfile
 
 from validate_release import ROOT, RUNTIME_FILES, validate
@@ -18,13 +21,93 @@ MOTION_SAMPLE_FILES = (
 )
 
 
+def minimum_blender():
+    """매니페스트가 요구하는 최소 Blender 버전."""
+    manifest = tomllib.loads((ROOT / "catani/blender_manifest.toml").read_text(encoding="utf-8"))
+    parts = str(manifest.get("blender_version_min", "0")).split(".")
+    return tuple(int(value) for value in (parts + ["0", "0", "0"])[:3])
+
+
+def blender_version(path):
+    """실행 파일에서 실제 버전을 읽는다. 폴더 이름은 실제 버전과 다를 수 있다."""
+    try:
+        result = subprocess.run([str(path), "--version"], text=True, encoding="utf-8", errors="replace",
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=180)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode:
+        return None
+    match = re.search(r"Blender (\d+)\.(\d+)(?:\.(\d+))?", result.stdout)
+    if match is None:
+        return None
+    return tuple(int(value) if value else 0 for value in match.groups())
+
+
+def blender_candidates():
+    """PATH와 흔한 설치 위치에서 Blender 실행 파일 후보를 모은다."""
+    found = []
+    located = shutil.which("blender.exe" if os.name == "nt" else "blender")
+    if located:
+        found.append(located)
+    roots = []
+    if os.name == "nt":
+        program_x86 = os.environ.get("ProgramFiles(x86)")
+        for base in (os.environ.get("ProgramFiles"), program_x86,
+                     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+            if base:
+                roots.append(Path(base) / "Blender Foundation")
+        if program_x86:
+            roots.append(Path(program_x86) / "Steam/steamapps/common")
+        # 압축을 풀어 쓰는 포터블 설치는 드라이브 상단이나 도구 폴더에 놓이는 경우가 많다.
+        drives = os.listdrives() if hasattr(os, "listdrives") else [f"{letter}:\\" for letter in string.ascii_uppercase]
+        for drive in drives:
+            base = Path(drive)
+            roots.extend([base, base / "Tools", base / "Apps", base / "Programs", base / "Program Files"])
+    else:
+        roots.extend([Path("/Applications"), Path.home() / "Applications", Path("/opt"), Path("/usr/local")])
+    for root in roots:
+        try:
+            children = sorted(root.glob("[Bb]lender*"))
+        except OSError:
+            continue
+        for child in children:
+            for relative in ("blender.exe", "blender", "Contents/MacOS/Blender", "Blender.app/Contents/MacOS/Blender"):
+                candidate = child / relative
+                if candidate.is_file():
+                    found.append(str(candidate))
+    return list(dict.fromkeys(found))
+
+
 def resolve_blender(value=None):
-    candidate = value or os.environ.get("BLENDER_BINARY") or shutil.which("blender")
-    if not candidate and os.name != "nt":
-        candidate = "/Applications/Blender.app/Contents/MacOS/Blender"
-    if not candidate or not Path(candidate).is_file():
-        raise ValueError("--blender 또는 BLENDER_BINARY로 Blender 실행 파일을 지정하세요.")
-    return str(Path(candidate).resolve())
+    """명시 경로가 없으면 최소 버전을 만족하는 가장 높은 버전을 스스로 찾는다.
+
+    4.3과 5.2가 함께 깔린 환경에서 PATH나 탐색 순서로 낮은 버전이 먼저 잡히면
+    애드온이 로드되지 않으므로, 후보를 모두 모은 뒤 실제 버전으로 비교한다.
+    """
+    candidate = value or os.environ.get("BLENDER_BINARY")
+    if candidate:
+        if not Path(candidate).is_file():
+            raise ValueError(f"지정한 Blender 실행 파일이 없습니다: {candidate}")
+        return str(Path(candidate).resolve())
+    minimum = minimum_blender()
+    best = None
+    too_old = []
+    for path in blender_candidates():
+        version = blender_version(path)
+        if version is None:
+            continue
+        if version < minimum:
+            too_old.append(f"{path} ({'.'.join(str(part) for part in version)})")
+            continue
+        if best is None or version > best[0]:
+            best = (version, path)
+    if best is not None:
+        return str(Path(best[1]).resolve())
+    wanted = ".".join(str(part) for part in minimum)
+    if too_old:
+        raise ValueError(f"Blender {wanted} 이상이 필요합니다. 찾은 설치: {', '.join(too_old)}. "
+                         "--blender 또는 BLENDER_BINARY로 지정하세요.")
+    raise ValueError("Blender 실행 파일을 찾지 못했습니다. --blender 또는 BLENDER_BINARY로 지정하세요.")
 
 
 def run_checked(command, env, label, cwd=ROOT):
