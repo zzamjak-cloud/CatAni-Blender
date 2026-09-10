@@ -34,6 +34,7 @@ class MotionAsset:
     source_id: str = ""
     size_bytes: int = 0
     available: bool = True
+    category: str = ""
 
 
 def addon_root():
@@ -126,7 +127,7 @@ def make_asset(filepath, meta=None):
         name=title, path=str(path), file_type=extension[1:],
         tags=normalize_tags(meta.get("tags", ())) or normalize_tags(title),
         source_id=source.id if source else "", size_bytes=path.stat().st_size,
-        available=True, **text,
+        available=True, category=source.category if source else "", **text,
     )
 
 
@@ -165,11 +166,22 @@ def catalog_assets(directories=(), existing_urls=()):
             license_note=entry.license_note, license_url=entry.license_url,
             download_url=entry.download_url, sha256=entry.sha256, blob_sha1=entry.blob_sha1,
             source_id=entry.id, size_bytes=entry.size_bytes, available=False,
+            category=entry.category,
         ))
     return sorted(assets, key=lambda asset: asset.name)
 
 
-def browse(directory, query="", extra=()):
+def filter_assets(assets, category="", local_only=False):
+    """카테고리와 '받은 모션만' 조건으로 목록을 좁힌다."""
+    result = list(assets)
+    if category:
+        result = [asset for asset in result if asset.category == category]
+    if local_only:
+        result = [asset for asset in result if asset.available]
+    return result
+
+
+def browse(directory, query="", extra=(), category="", local_only=False):
     """받아 둔 모션을 먼저, 아직 받지 않은 공개 모션을 뒤에 놓고 검색한다.
 
     `extra`는 애드온에 동봉한 예제처럼 읽기 전용으로 함께 훑을 폴더다.
@@ -187,8 +199,8 @@ def browse(directory, query="", extra=()):
                 seen.add(asset.path)
                 local.append(asset)
     local.sort(key=lambda asset: asset.name)
-    remote = catalog_assets(roots, {asset.download_url for asset in local if asset.download_url})
-    return search_assets(local + remote, query)
+    remote = [] if local_only else catalog_assets(roots, {asset.download_url for asset in local if asset.download_url})
+    return filter_assets(search_assets(local + remote, query), category, local_only)
 
 
 def search_assets(assets, query):

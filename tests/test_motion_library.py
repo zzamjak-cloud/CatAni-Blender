@@ -83,6 +83,29 @@ class MotionLibraryTests(unittest.TestCase):
             self.assertEqual(len(browse(library, "없는검색어")), 0)
             self.assertEqual(len(browse("", "")), len(CATALOG), "폴더가 비어 있어도 공개 카탈로그는 보여야 합니다")
 
+    def test_browse_filters_by_category_and_local_only(self):
+        with tempfile.TemporaryDirectory(prefix="catani-motion-filter-") as directory:
+            library = Path(directory)
+            entry = CATALOG[0]
+            self.assertTrue(entry.category, "검사에 쓸 카탈로그 항목에 카테고리가 없습니다")
+            same = [item for item in CATALOG if item.category == entry.category]
+            listed = browse(library, category=entry.category)
+            self.assertEqual(len(listed), len(same))
+            self.assertTrue(all(asset.category == entry.category for asset in listed))
+            self.assertEqual(browse(library, local_only=True), [])
+
+            target = library / entry.local_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("HIERARCHY\n", encoding="utf-8")
+            (library / "motions.json").write_text(
+                json.dumps({"motions": [{"file": entry.local_path, "name": entry.name, "download_url": entry.download_url}]}),
+                encoding="utf-8")
+            local = browse(library, local_only=True)
+            self.assertEqual(len(local), 1)
+            # 받아 둔 파일도 출처를 통해 카테고리를 이어받아 같은 필터에 걸린다.
+            self.assertEqual(local[0].category, entry.category)
+            self.assertEqual(len(browse(library, category=entry.category, local_only=True)), 1)
+
     def test_missing_directory_and_invalid_manifest(self):
         with tempfile.TemporaryDirectory(prefix="catani-motion-library-") as directory:
             library = Path(directory)

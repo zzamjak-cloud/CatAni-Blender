@@ -45,7 +45,7 @@ BLENDER_TESTS = (
     ("blender_operators.py", None),
 )
 
-HOST_TESTS = ("test_motion_library.py", "test_motion_download.py")
+HOST_TESTS = ("test_motion_library.py", "test_motion_download.py", "test_motion_preview.py")
 
 
 def run_suite(blender):

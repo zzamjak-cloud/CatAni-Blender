@@ -175,7 +175,42 @@ assert len(set(bpy.data.objects) - scene_objects) >= 1, "자동 적용이 모션
 assert downloaded.path in settings.apply_report, "리포트에 실제 사용한 파일 경로가 없습니다"
 assert "검증:" in settings.apply_report and "방향 오차" in settings.apply_report
 
+# 미리보기: 임시 리그를 불러와 재생 구간을 잡고, 정리하면 장면과 프레임 범위를 되돌린다.
+bpy.data.batch_remove(ids=[obj for obj in bpy.data.objects if obj.get("catani_motion_source")])
+scene = bpy.context.scene
+scene.frame_start, scene.frame_end = 1, 250
+before_preview = set(bpy.data.objects)
+settings.motion_active = next(index for index, item in enumerate(settings.motions) if item.source_id == entry.id)
+assert bpy.ops.catani.motion_preview() == {"FINISHED"}, settings.motion_status
+assert settings.preview_active and settings.preview_collection
+collection_name = settings.preview_collection
+assert bpy.data.collections[collection_name].objects, "미리보기 리그를 불러오지 않았습니다"
+assert (scene.frame_start, scene.frame_end) != (1, 250), "미리보기가 재생 구간을 잡지 않았습니다"
+assert "미리보기 재생 중" in settings.motion_status, settings.motion_status
+assert bpy.ops.catani.preview_clear() == {"FINISHED"}
+assert not settings.preview_active and not settings.preview_collection
+assert (scene.frame_start, scene.frame_end) == (1, 250), "미리보기 정리가 프레임 범위를 되돌리지 않았습니다"
+assert set(bpy.data.objects) == before_preview, "미리보기 정리가 임시 리그를 남겼습니다"
+assert collection_name not in bpy.data.collections, "미리보기 정리가 컬렉션을 남겼습니다"
+
+# 미리보기 뒤 적용하면 같은 임시 리그를 그대로 모션 원본으로 넘긴다.
+assert bpy.ops.catani.motion_preview() == {"FINISHED"}, settings.motion_status
+collection_name = settings.preview_collection
+assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
+assert "적용됨" in settings.motion_status, settings.motion_status
+assert not settings.preview_active and not bpy.ops.catani.preview_clear.poll()
+assert collection_name in bpy.data.collections, "적용이 미리보기 리그를 지웠습니다"
+
+# 이미 적용해 숨겨 둔 원본을 다시 미리보면 드러냈다가 정리할 때 숨김으로 되돌린다.
+source = next(obj for obj in bpy.data.objects if obj.get("catani_motion_source") and obj.type == "ARMATURE")
+assert source.hide_get(), "적용 뒤 모션 원본이 숨겨지지 않았습니다"
+assert bpy.ops.catani.motion_preview() == {"FINISHED"}, settings.motion_status
+assert not source.hide_get(), "재사용한 원본을 미리보기에서 드러내지 않았습니다"
+assert not settings.preview_collection, "이미 있던 원본을 정리 대상으로 잡았습니다"
+assert bpy.ops.catani.preview_clear() == {"FINISHED"}
+assert source.hide_get(), "재사용한 원본을 다시 숨기지 않았습니다"
+
 addon.unregister()
 addon.register()
 temporary.cleanup()
-print("CATANI_PASS 통합 목록·즉시 검색·적용·원본 보존·mock 다운로드 후 자동 적용·실패 경로")
+print("CATANI_PASS 통합 목록·즉시 검색·적용·원본 보존·mock 다운로드 후 자동 적용·미리보기 세션·실패 경로")

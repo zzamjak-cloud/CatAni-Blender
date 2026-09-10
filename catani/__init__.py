@@ -1,20 +1,30 @@
 """CatAni: 공개 모션을 검색하고 캐릭터에 바로 적용하는 Extension."""
 
 import math
+from pathlib import Path
 import textwrap
 
 import bpy
+import bpy.utils.previews
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 
-from . import engine, retarget
+from . import engine, motion_preview, retarget
 from .core import MotionSpec
 from .motion_downloader import DownloadJob
 from .motion_import import import_asset
 from .motion_library import MotionAsset, browse, bundled_library_path, normalize_tags
-from .source_catalog import get_source
+from .source_catalog import CATEGORIES, get_source
 
-# {"download": DownloadJob, "scene": Scene, "apply": bool, "asset": str}
+# {"download": DownloadJob, "scene": Scene, "apply": bool, "preview": bool, "path": str}
 _job = None
+
+# 표본 포즈 그림 캐시. {식별자: (파일 키, [icon_id, ...], MotionSketch)}
+_previews = None
+_sketches = {}
+_SKETCH_LIMIT = 6
+_CATEGORY_ITEMS = [("ALL", "전체 카테고리", "카테고리로 거르지 않습니다")] + [
+    (key, label, f"{label} 모션만 봅니다") for key, label in sorted(CATEGORIES.items(), key=lambda pair: pair[1])
+]
 
 
 def user_library_path():
@@ -54,6 +64,53 @@ def _fill(item, asset):
     item.source_id = asset.source_id
     item.size_bytes = min(asset.size_bytes, 2**31 - 1)
     item.available = asset.available
+    item.category = asset.category
+
+
+def _forget_sketch(identifier):
+    entry = _sketches.pop(identifier, None)
+    if entry is None or _previews is None:
+        return
+    for index in range(len(entry[1])):
+        name = f"{identifier}:{index}"
+        if name in _previews:
+            del _previews[name]
+
+
+def _sketch(item):
+    """선택 모션의 표본 포즈 아이콘과 메타 정보. 실패하면 (None, None, 사유)."""
+    if _previews is None:
+        return None, None, "미리보기 그림을 준비하지 못했습니다."
+    if not item.available or not item.path:
+        return None, None, "아직 받지 않은 모션입니다. 재생을 누르면 내려받은 뒤 그립니다."
+    if item.file_type != "bvh":
+        return None, None, "표본 포즈 그림은 BVH 모션만 지원합니다."
+    path = Path(bpy.path.abspath(item.path))
+    try:
+        key = (str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return None, None, "모션 파일을 찾을 수 없습니다."
+    cached = _sketches.get(item.identifier)
+    if cached is not None and cached[0] == key:
+        return cached[1], cached[2], ""
+    _forget_sketch(item.identifier)
+    try:
+        motion = motion_preview.sketch(str(path))
+    except (ValueError, OSError, UnicodeDecodeError) as error:
+        return None, None, str(error)[:90]
+    while len(_sketches) >= _SKETCH_LIMIT:
+        _forget_sketch(next(iter(_sketches)))
+    icons = []
+    for index in range(len(motion.poses)):
+        name = f"{item.identifier}:{index}"
+        if name in _previews:
+            del _previews[name]
+        preview = _previews.new(name)
+        preview.image_size = (motion_preview.THUMB_SIZE, motion_preview.THUMB_SIZE)
+        preview.image_pixels_float = motion_preview.pixels(motion, index)
+        icons.append(preview.icon_id)
+    _sketches[item.identifier] = (key, icons, motion)
+    return icons, motion, ""
 
 
 def refresh(scene, keep=""):
@@ -62,7 +119,9 @@ def refresh(scene, keep=""):
     wanted = keep or (settings.motions[settings.motion_active].identifier if 0 <= settings.motion_active < len(settings.motions) else "")
     try:
         assets = browse(bpy.path.abspath(settings.motion_library_path), settings.motion_query,
-                        extra=[str(bundled_library_path())])
+                        extra=[str(bundled_library_path())],
+                        category="" if settings.motion_category == "ALL" else settings.motion_category,
+                        local_only=settings.local_only)
     except (ValueError, OSError) as error:
         settings.motions.clear()
         settings.motion_status = str(error)[:250]
@@ -89,6 +148,7 @@ def _asset(item):
         license_note=item.license_note, license_url=item.license_url,
         download_url=item.download_url, sha256=item.sha256, blob_sha1=item.blob_sha1,
         source_id=item.source_id, size_bytes=item.size_bytes, available=item.available,
+        category=item.category,
     )
 
 
@@ -129,18 +189,93 @@ def _armature_poll(_self, obj):
     return obj.type == "ARMATURE" and not obj.get("catani_motion_source")
 
 
+def _viewport(context):
+    """재생과 시점 맞춤에 쓸 3D 뷰 영역을 찾는다."""
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            region = next((item for item in area.regions if item.type == "WINDOW"), None)
+            if region is not None:
+                return window, area, region
+    return None, None, None
+
+
+def _play(context, focus=False):
+    window, area, region = _viewport(context)
+    if area is None:
+        return
+    with context.temp_override(window=window, screen=window.screen, area=area, region=region):
+        if focus:
+            try:
+                bpy.ops.view3d.view_selected()
+            except RuntimeError:
+                pass
+        if not context.screen.is_animation_playing:
+            bpy.ops.screen.animation_play()
+
+
+def _stop_play(context):
+    window, area, region = _viewport(context)
+    if area is None:
+        return
+    with context.temp_override(window=window, screen=window.screen, area=area, region=region):
+        if context.screen.is_animation_playing:
+            bpy.ops.screen.animation_cancel(restore_frame=False)
+
+
+def _release_preview(settings):
+    """미리보기 리그를 그대로 쓰기로 했을 때 추적만 끊는다. 오브젝트는 남긴다."""
+    settings.preview_active = False
+    settings.preview_name = ""
+    settings.preview_path = ""
+    settings.preview_collection = ""
+    settings.preview_reused = ""
+
+
+def _clear_preview(context):
+    """미리보기로 불러온 임시 리그와 프레임 범위를 되돌린다."""
+    settings = context.scene.catani_settings
+    if not settings.preview_active:
+        return
+    _stop_play(context)
+    collection = bpy.data.collections.get(settings.preview_collection) if settings.preview_collection else None
+    if collection is not None:
+        victims = [collection]
+        for obj in collection.objects:
+            victims.append(obj)
+            victims.append(obj.data)
+            action = obj.animation_data.action if obj.animation_data else None
+            if action is not None:
+                action.use_fake_user = False
+                victims.append(action)
+        bpy.data.batch_remove(ids=[item for item in victims if item is not None])
+    reused = bpy.data.objects.get(settings.preview_reused) if settings.preview_reused else None
+    if reused is not None and settings.preview_hidden:
+        # 이미 적용해 숨겨 두었던 원본을 미리보려고 드러냈으므로 다시 숨긴다.
+        for obj in [reused, *reused.children_recursive]:
+            if obj.name in context.view_layer.objects:
+                obj.hide_set(True)
+            obj.hide_render = True
+    scene = context.scene
+    scene.frame_start, scene.frame_end = settings.preview_frame_start, settings.preview_frame_end
+    scene.frame_set(min(max(scene.frame_current, scene.frame_start), scene.frame_end))
+    _release_preview(settings)
+
+
 def _stop_timer():
     if bpy.app.timers.is_registered(_poll_download):
         bpy.app.timers.unregister(_poll_download)
 
 
-def _start_download(context, source_id, apply_after):
+def _start_download(context, source_id, apply_after, preview_after=False):
     global _job
     settings = context.scene.catani_settings
     if not settings.motion_library_path.strip():
         raise ValueError("내려받을 모션 폴더를 상세 설정에서 지정하세요.")
     entry = get_source(source_id)
-    _job = {"download": DownloadJob(entry, bpy.path.abspath(settings.motion_library_path)), "scene": context.scene, "apply": apply_after, "path": entry.local_path}
+    _job = {"download": DownloadJob(entry, bpy.path.abspath(settings.motion_library_path)), "scene": context.scene,
+            "apply": apply_after, "preview": preview_after, "path": entry.local_path}
     settings.download_progress = 0.0
     settings.download_status = f"{entry.name} 다운로드 준비 중"
     _stop_timer()
@@ -160,6 +295,7 @@ def _poll_download():
             _redraw()
             return 0.2
         follow_up = _job["apply"] and not job.error
+        preview_up = _job["preview"] and not job.error
         result = str(job.result) if job.result else ""
         _job = None
         if job.error:
@@ -173,6 +309,8 @@ def _poll_download():
         _redraw()
         if follow_up:
             bpy.ops.catani.motion_apply("EXEC_DEFAULT")
+        elif preview_up:
+            bpy.ops.catani.motion_preview("EXEC_DEFAULT")
         return None
     except Exception as error:
         job.cancel()
@@ -193,8 +331,13 @@ def _stop_download(_unused=None):
 
 def _refresh_all():
     for scene in bpy.data.scenes:
-        if hasattr(scene, "catani_settings"):
-            refresh(scene)
+        if not hasattr(scene, "catani_settings"):
+            continue
+        settings = scene.catani_settings
+        # 미리보기 도중 저장·불러오기를 하면 임시 리그가 없어도 상태만 남는다.
+        if settings.preview_active and bpy.data.collections.get(settings.preview_collection) is None:
+            _release_preview(settings)
+        refresh(scene)
     _redraw()
     return None
 
@@ -224,12 +367,24 @@ class CatAniMotionItem(bpy.types.PropertyGroup):
     source_id: StringProperty()
     size_bytes: IntProperty()
     available: BoolProperty(default=True)
+    category: StringProperty()
 
 
 class CatAniSettings(bpy.types.PropertyGroup):
     motion_query: StringProperty(name="검색", description="모션 이름·설명·태그에서 모든 단어를 포함하는 항목만 남깁니다", default="", update=_on_search)
+    motion_category: EnumProperty(name="카테고리", description="공개 카탈로그의 동작 분류로 목록을 좁힙니다",
+                                  items=_CATEGORY_ITEMS, default="ALL", update=_on_search)
+    local_only: BoolProperty(name="받은 모션만", description="이미 내려받아 바로 재생할 수 있는 모션만 남깁니다", default=False, update=_on_search)
     motions: CollectionProperty(type=CatAniMotionItem)
     motion_active: IntProperty(name="선택 모션", default=0)
+    preview_active: BoolProperty(default=False, options={"HIDDEN"})
+    preview_name: StringProperty(default="", options={"HIDDEN"})
+    preview_path: StringProperty(default="", options={"HIDDEN"})
+    preview_collection: StringProperty(default="", options={"HIDDEN"})
+    preview_reused: StringProperty(default="", options={"HIDDEN"})
+    preview_hidden: BoolProperty(default=False, options={"HIDDEN"})
+    preview_frame_start: IntProperty(default=1, options={"HIDDEN"})
+    preview_frame_end: IntProperty(default=250, options={"HIDDEN"})
     target_armature: PointerProperty(name="대상", description="애니메이션을 적용할 캐릭터 아마추어", type=bpy.types.Object, poll=_armature_poll)
     motion_status: StringProperty(name="상태", default="모션을 검색하고 대상 캐릭터를 지정한 뒤 적용하세요.")
     apply_report: StringProperty(name="적용 리포트", default="")
@@ -295,6 +450,13 @@ class CATANI_OT_motion_apply(bpy.types.Operator):
             if not item.available:
                 _start_download(context, item.source_id, apply_after=True)
                 return {"FINISHED"}
+            if settings.preview_active:
+                _stop_play(context)
+                # 같은 모션을 미리보고 있었다면 그 리그를 그대로 원본으로 쓴다.
+                if settings.preview_path == item.path:
+                    _release_preview(settings)
+                else:
+                    _clear_preview(context)
             restore = _enter_object_mode(context)
             self._apply(context, settings, item, target)
         except Exception as error:
@@ -386,6 +548,167 @@ class CATANI_OT_motion_import(bpy.types.Operator):
         finally:
             _leave_object_mode(restore)
         return {"FINISHED"}
+
+
+class CATANI_OT_motion_preview(bpy.types.Operator):
+    bl_idname = "catani.motion_preview"
+    bl_label = "뷰포트에서 재생"
+    bl_description = "선택한 모션 원본 리그를 임시로 불러와 뷰포트에서 재생합니다. 적용하면 그대로 원본으로 쓰입니다"
+
+    @classmethod
+    def poll(cls, context):
+        return _job is None and engine.get_session() is None
+
+    def execute(self, context):
+        settings = context.scene.catani_settings
+        restore = None
+        try:
+            item = _selected(settings)
+            if not item.available:
+                _start_download(context, item.source_id, apply_after=False, preview_after=True)
+                return {"FINISHED"}
+            _clear_preview(context)
+            restore = _enter_object_mode(context)
+            self._show(context, settings, item)
+        except Exception as error:
+            settings.motion_status = str(error)[:250]
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        finally:
+            _leave_object_mode(restore)
+        return {"FINISHED"}
+
+    def _show(self, context, settings, item):
+        asset = _asset(item)
+        source = _existing_source(asset)
+        collection = None
+        if source is None:
+            created, collection = import_asset(context, asset)
+            source = next(obj for obj in created if obj.type == "ARMATURE")
+        family = [source, *source.children_recursive]
+        settings.preview_hidden = source.hide_get()
+        for obj in family:
+            obj.hide_set(False)
+            obj.hide_render = False
+        scene = context.scene
+        settings.preview_frame_start, settings.preview_frame_end = scene.frame_start, scene.frame_end
+        settings.preview_active = True
+        settings.preview_name = item.name
+        settings.preview_path = item.path
+        # 이미 씬에 있던 원본은 정리 대상이 아니다. 이번에 불러온 컬렉션만 지운다.
+        settings.preview_collection = collection.name if collection is not None else ""
+        settings.preview_reused = "" if collection is not None else source.name
+        start, end = retarget.action_frame_range(source)
+        scene.frame_start, scene.frame_end = start, end
+        scene.frame_set(start)
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        source.select_set(True)
+        context.view_layer.objects.active = source
+        _play(context, focus=True)
+        settings.motion_status = f"미리보기 재생 중 · {item.name} · {start}~{end}f"
+
+
+class CATANI_OT_preview_clear(bpy.types.Operator):
+    bl_idname = "catani.preview_clear"
+    bl_label = "미리보기 정리"
+    bl_description = "미리보기로 불러온 임시 리그를 지우고 프레임 범위를 되돌립니다"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.catani_settings.preview_active
+
+    def execute(self, context):
+        settings = context.scene.catani_settings
+        try:
+            _clear_preview(context)
+        except Exception as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        settings.motion_status = "미리보기를 정리했습니다."
+        return {"FINISHED"}
+
+
+def _duration_line(item, motion):
+    """받은 파일은 실제 표본에서, 아직 안 받은 모션은 카탈로그에서 길이를 읽는다."""
+    frames, fps = (motion.frames, motion.fps) if motion is not None else (0, 0.0)
+    if not frames and item.source_id:
+        try:
+            entry = get_source(item.source_id)
+        except ValueError:
+            entry = None
+        if entry is not None:
+            frames, fps = entry.frames, entry.fps
+    if not frames:
+        return ""
+    return f"{frames:,}프레임 · 약 {frames / fps:.1f}초 · {fps:.0f} fps" if fps else f"{frames:,}프레임"
+
+
+class CATANI_OT_motion_browser(bpy.types.Operator):
+    bl_idname = "catani.motion_browser"
+    bl_label = "모션 샘플 보기"
+    bl_description = "넓은 창에서 모션을 검색하고 표본 포즈로 확인한 뒤 대상 아마추어에 적용합니다"
+
+    def invoke(self, context, _event):
+        refresh(context.scene)
+        return context.window_manager.invoke_props_dialog(self, width=1080, title="CatAni · 모션 샘플", confirm_text="적용하기")
+
+    def draw(self, context):
+        _draw_browser(self.layout, context.scene.catani_settings)
+
+    def execute(self, context):
+        if not CATANI_OT_motion_apply.poll(context):
+            self.report({"WARNING"}, "다운로드나 절차 동작 미리보기가 끝난 뒤 적용하세요.")
+            return {"CANCELLED"}
+        return bpy.ops.catani.motion_apply("EXEC_DEFAULT")
+
+
+def _draw_browser(layout, settings):
+    header = layout.row(align=True)
+    header.prop(settings, "motion_query", text="", icon="VIEWZOOM")
+    header.prop(settings, "motion_category", text="")
+    header.prop(settings, "local_only", toggle=True)
+    header.operator("catani.motion_refresh", text="", icon="FILE_REFRESH")
+    body = layout.split(factor=0.34)
+    listing = body.column()
+    listing.template_list("CATANI_UL_motions", "catani_browser", settings, "motions", settings, "motion_active", rows=16)
+    listing.label(text=settings.motion_status[:60], icon="INFO")
+    _draw_detail(body.column(), settings)
+
+
+def _draw_detail(layout, settings):
+    """선택한 모션의 표본 포즈와 정보, 재생·대상 지정을 담는다."""
+    try:
+        item = _selected(settings)
+    except ValueError as error:
+        layout.label(text=str(error), icon="ERROR")
+        return
+    layout.label(text=item.name, icon="ARMATURE_DATA" if item.available else "IMPORT")
+    icons, motion, note = _sketch(item)
+    strip = layout.box()
+    if icons:
+        row = strip.row(align=True)
+        for icon in icons:
+            row.template_icon(icon_value=icon, scale=5.0)
+        strip.label(text="시간 순서로 뽑은 표본 포즈 · 흐린 선은 직전 포즈")
+    else:
+        strip.label(text=note, icon="INFO")
+    info = layout.column(align=True)
+    info.label(text=f"형식 {item.file_type.upper()} · {item.size_bytes / 1024:.0f} KB · 카테고리 {CATEGORIES.get(item.category, item.category or '없음')}")
+    length = _duration_line(item, motion)
+    if length:
+        info.label(text=length)
+    info.label(text=f"태그 {item.tags or '없음'}")
+    _lines(info, item.description or "설명 없음", 72)
+    layout.prop(settings, "target_armature", text="대상")
+    row = layout.row(align=True)
+    row.scale_y = 1.4
+    if item.available:
+        row.operator("catani.motion_preview", text="뷰포트에서 재생", icon="PLAY")
+    else:
+        row.operator("catani.motion_preview", text=f"받아서 재생 · {item.size_bytes / 1024:.0f}KB", icon="IMPORT")
+    row.operator("catani.motion_info", text="출처", icon="INFO")
+    layout.label(text="[적용하기]를 누르면 대상 아마추어에 굽습니다.", icon="CHECKMARK")
 
 
 class CATANI_OT_motion_download(bpy.types.Operator):
@@ -575,12 +898,20 @@ class CATANI_PT_main(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.catani_settings
-        layout.prop(settings, "motion_query", text="", icon="VIEWZOOM")
-        layout.template_list("CATANI_UL_motions", "", settings, "motions", settings, "motion_active", rows=6)
+        browse_row = layout.row()
+        browse_row.scale_y = 1.6
+        browse_row.operator("catani.motion_browser", text="모션 샘플 보기", icon="VIEWZOOM")
+        chosen = settings.motions[settings.motion_active] if 0 <= settings.motion_active < len(settings.motions) else None
+        layout.label(text=chosen.name if chosen else "선택한 모션 없음",
+                     icon="ARMATURE_DATA" if chosen and chosen.available else "IMPORT")
         layout.prop(settings, "target_armature", text="대상")
         button = layout.row()
         button.scale_y = 1.6
         button.operator("catani.motion_apply", text="적용", icon="PLAY")
+        if settings.preview_active:
+            preview = layout.box()
+            preview.label(text=f"미리보기 재생 중 · {settings.preview_name}"[:44], icon="HIDE_OFF")
+            preview.operator("catani.preview_clear", icon="TRASH")
         if _job is not None:
             layout.progress(factor=settings.download_progress, text=settings.download_status[:48])
             layout.operator("catani.download_cancel", icon="X")
@@ -620,6 +951,7 @@ class CATANI_PT_procedural(bpy.types.Panel):
 _classes = (
     CatAniMotionItem, CatAniSettings, CATANI_UL_motions,
     CATANI_OT_motion_refresh, CATANI_OT_motion_apply, CATANI_OT_motion_import,
+    CATANI_OT_motion_preview, CATANI_OT_preview_clear, CATANI_OT_motion_browser,
     CATANI_OT_motion_download, CATANI_OT_download_cancel,
     CATANI_OT_motion_info, CATANI_OT_settings,
     CATANI_OT_inspect, CATANI_OT_preview, CATANI_OT_confirm, CATANI_OT_cancel,
@@ -637,6 +969,11 @@ _handlers = (
 
 
 def register():
+    global _previews
+    if _previews is not None:
+        bpy.utils.previews.remove(_previews)
+    _sketches.clear()
+    _previews = bpy.utils.previews.new()
     for cls in _classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.catani_settings = PointerProperty(type=CatAniSettings)
@@ -646,7 +983,12 @@ def register():
 
 
 def unregister():
+    global _previews
     _stop_download()
+    _sketches.clear()
+    if _previews is not None:
+        bpy.utils.previews.remove(_previews)
+        _previews = None
     if bpy.app.timers.is_registered(_refresh_all):
         bpy.app.timers.unregister(_refresh_all)
     engine.cancel_preview(bpy.context)
