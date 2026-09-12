@@ -9,11 +9,18 @@ import re
 import shutil
 import string
 import subprocess
+import sys
 import tempfile
 import tomllib
 import zipfile
 
 from validate_release import ROOT, RUNTIME_FILES, validate
+
+# Windows 콘솔 기본 코드페이지(cp1252/cp949)는 한국어 실패 로그를 담지 못한다.
+# 인코딩 오류로 실행이 멈추면 진짜 실패 원인이 묻히므로 대체 문자로 흘려보낸다.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
 
 MOTION_SAMPLE_FILES = (
     Path("motions/motions.json"),

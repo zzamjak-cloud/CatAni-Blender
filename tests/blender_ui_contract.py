@@ -136,8 +136,9 @@ assert {"catani.library_open", "catani.library_guide"} <= set(detail["operators"
 
 # 보관 위치 팝업이 현재 폴더·기본 위치·업데이트 안내와 폴더 열기 버튼을 담는지.
 guide = record(addon.CATANI_OT_library_guide.draw, bpy.context)
-packed_guide = " ".join(guide["labels"]).replace(" ", "")
-assert addon.user_library_path().replace(" ", "") in packed_guide, "팝업에 기본 보관 위치가 없습니다"
+# 경로는 폭에 맞춰 접히고 Windows에서는 구분자가 역슬래시로 나오므로 둘 다 없애고 대조한다.
+packed_guide = " ".join(guide["labels"]).replace(" ", "").replace("\\", "/")
+assert addon.user_library_path().replace(" ", "").replace("\\", "/") in packed_guide, "팝업에 기본 보관 위치가 없습니다"
 assert "업데이트" in packed_guide and "사용자데이터폴더" in packed_guide, guide["labels"]
 assert {"catani.library_open", "catani.library_migrate"} <= set(guide["operators"]), guide["operators"]
 assert "가져오기" in packed_guide, guide["labels"]
