@@ -12,7 +12,7 @@ package = types.ModuleType("catani")
 package.__path__ = [str(root / "catani")]
 sys.modules["catani"] = package
 
-from catani.motion_library import (MotionAsset, browse, catalog_assets, filter_assets, make_asset,
+from catani.motion_library import (MotionAsset, browse, catalog_assets, filter_assets, make_asset, merge_manifest,
                                    read_manifest, scan_library, search_assets, update_manifest)
 from catani.source_catalog import CATALOG
 
@@ -188,6 +188,30 @@ class MotionLibraryTests(unittest.TestCase):
                 update_manifest(library, "../탈출.bvh", {"name": "안 됨"})
             with self.assertRaises(ValueError):
                 update_manifest(library / "없는폴더", entry.local_path, {"name": "안 됨"})
+
+    def test_merge_manifest_folds_many_entries_at_once(self):
+        """폴더를 통째로 가져올 때 인덱스를 한 번만 쓰고 기존 이름은 지키는지."""
+        entries = CATALOG[:3]
+        with tempfile.TemporaryDirectory(prefix="catani-motion-merge-") as directory:
+            library = Path(directory)
+            for entry in entries:
+                target = library / entry.local_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("HIERARCHY\nMOTION\n", encoding="utf-8")
+            update_manifest(library, entries[0].local_path, {"name": "먼저 붙인 이름", "description": "지켜야 한다"})
+            merged = merge_manifest(library, {entry.local_path: {"name": f"가져온 {index}"}
+                                              for index, entry in enumerate(entries)})
+            self.assertEqual(len(merged), len(entries))
+            manifest = read_manifest(library)
+            self.assertEqual(len(manifest), len(entries))
+            # 같은 파일의 기존 필드는 남고 넘긴 필드만 덮인다.
+            self.assertEqual(manifest[entries[0].local_path]["description"], "지켜야 한다")
+            self.assertEqual(manifest[entries[0].local_path]["name"], "가져온 0")
+            self.assertEqual({asset.name for asset in scan_library(library)},
+                             {f"가져온 {index}" for index in range(len(entries))})
+            self.assertNotIn(".catani-index-", " ".join(path.name for path in library.iterdir()))
+            with self.assertRaises(ValueError):
+                merge_manifest(library, {"../탈출.bvh": {"name": "안 됨"}})
 
     def test_unicode_names_and_stable_ids(self):
         with tempfile.TemporaryDirectory(prefix="catani-motion-library-") as directory:

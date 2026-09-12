@@ -1,6 +1,6 @@
 # CatAni
 
-CatAni 0.6.0은 공개 모션 캡처 데이터를 Blender 안에서 **검색하고, 뷰포트에서 재생해 확인하고, 캐릭터에 바로 적용**하는 Extension입니다. 사이드바에 검색 칸과 긴 목록을 그대로 두어 샘플을 훑으면서 고릅니다. 폴더 경로·출처·이용 조건·체크섬·굽기 옵션 같은 정보는 별도 팝업으로 옮겼습니다.
+CatAni 0.6.1은 공개 모션 캡처 데이터를 Blender 안에서 **검색하고, 뷰포트에서 재생해 확인하고, 캐릭터에 바로 적용**하는 Extension입니다. 사이드바에 검색 칸과 긴 목록을 그대로 두어 샘플을 훑으면서 고릅니다. 폴더 경로·출처·이용 조건·체크섬·굽기 옵션 같은 정보는 별도 팝업으로 옮겼습니다.
 
 기본 카탈로그에는 공개 모션 **5,908종**이 걷기·달리기·점프·춤·발차기·동물 흉내·공구 작업 등 **50개 동작 분류**로 정리되어 있습니다.
 
@@ -40,14 +40,14 @@ CatAni 0.6.0은 공개 모션 캡처 데이터를 Blender 안에서 **검색하�
 
 ### 방법 2 · ZIP 직접 설치
 
-1. [Releases](https://github.com/zzamjak-cloud/CatAni-Blender/releases/latest)에서 `catani-v0.6.0.zip`을 내려받습니다.
+1. [Releases](https://github.com/zzamjak-cloud/CatAni-Blender/releases/latest)에서 `catani-v0.6.1.zip`을 내려받습니다.
 2. **Edit → Preferences → Get Extensions → ▼ → Install from Disk**를 누릅니다.
 3. 내려받은 ZIP을 선택합니다.
 
-같은 페이지의 `catani-v0.6.0.zip.sha256`으로 무결성을 확인할 수 있습니다.
+같은 페이지의 `catani-v0.6.1.zip.sha256`으로 무결성을 확인할 수 있습니다.
 
 ```bash
-shasum -a 256 -c catani-v0.6.0.zip.sha256   # macOS / Linux
+shasum -a 256 -c catani-v0.6.1.zip.sha256   # macOS / Linux
 ```
 
 이 방법으로 넣은 설치본은 Blender가 원격 갱신 대상으로 잡지 않습니다. 업데이트 알림을 쓰려면 방법 1을 사용하세요.
@@ -71,6 +71,10 @@ shasum -a 256 -c catani-v0.6.0.zip.sha256   # macOS / Linux
 `ⓘ 출처` 버튼은 선택 모션의 실제 다운로드 주소, git blob SHA-1, 출처, 이용 조건과 원문 링크를 팝업으로 보여 줍니다. `⚙ 상세 설정` 버튼은 모션 폴더, 프레임 간격, 노이즈 완화, 곡선 간소화 오차, 이동 적용, 바닥 관통 보정, IK 전환, 원본 리그 숨기기와 **마지막 적용 리포트**(본 매핑 표, 규격, 키 수와 감소율, 검증 오차, 실측 곡선 오차, 접지 보정량, IK 체인과 목표·관절 오차, 음소거한 NLA 트랙)를 담습니다.
 
 내려받은 모션은 Blender 사용자 데이터 폴더(`.../datafiles/catani/motions`)에 쌓입니다. 설치된 애드온 폴더에는 쓰지 않으므로 읽기 전용 설치에서도 동작하며, 애드온에 동봉한 예제 모션은 항상 함께 검색됩니다.
+
+패널 맨 아래 `모션 폴더` 버튼(또는 `⚙ 상세 설정`의 같은 버튼)이 보관 위치 팝업을 엽니다. 현재 폴더 경로와 보관 중인 BVH 개수를 보여 주고, **폴더 열기**로 운영체제 파일 탐색기를 바로 엽니다. 받은 파일은 애드온 설치 폴더 밖에 있으므로 **애드온을 업데이트하거나 다시 설치해도 지워지지 않습니다.** 폴더가 새로 생기는 경우는 Blender 자체를 새 버전으로 올렸을 때뿐입니다(`.../Blender/5.2/...` → `.../Blender/5.3/...`).
+
+이때는 같은 팝업의 **모션 가져오기**로 이전 버전 폴더를 고르면 하위 폴더 구조 그대로 BVH를 복사하고 `motions.json`의 이름·분류·태그까지 합쳐 옵니다. 같은 이름의 기존 파일은 덮어쓰지 않고 건너뜁니다. 이전 버전 폴더가 그대로 남아 있으면 팝업이 자동으로 찾아 `여기서 가져오기`·`이 폴더 사용` 버튼을 띄웁니다.
 
 ## 적용이 실제로 무엇을 하는지
 
@@ -262,23 +266,23 @@ macOS Blender 5.2.0에서 통합 목록·즉시 검색, 다운로드 후 자동 
 
 ## 패키징과 릴리즈 준비
 
-현재 공개 버전은 **0.6.0**입니다. 새 버전을 준비할 때는 Python 3.11 이상과 Blender 5.2.0 이상을 갖추고 저장소 루트에서 실행합니다.
+현재 공개 버전은 **0.6.1**입니다. 새 버전을 준비할 때는 Python 3.11 이상과 Blender 5.2.0 이상을 갖추고 저장소 루트에서 실행합니다.
 
 ```bash
-python3 scripts/validate_release.py --tag v0.6.0
+python3 scripts/validate_release.py --tag v0.6.1
 python3 scripts/run_tests.py
-python3 scripts/package.py --tag v0.6.0
+python3 scripts/package.py --tag v0.6.1
 ```
 
 Windows에서는 `python3` 대신 `python`을 사용합니다. Blender 경로는 자동 감지되며, 원하는 설치를 고르지 않을 때만 `BLENDER_BINARY` 또는 각 실행 명령의 `--blender`로 지정합니다. 전체 검사기는 임시 복사본과 독립 프로필에서 실행하므로 기존 개발 결과를 덮어쓰지 않습니다. 실제 CMU 다운로드는 기본 검사에 포함하지 않습니다.
 
-`dist/catani-v0.6.0.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스와 기본 데모 BVH만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 다운로드된 CMU 모션 파일은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
+`dist/catani-v0.6.1.zip`과 SHA-256 파일이 생성됩니다. 패키지에는 런타임 Python 파일, 매니페스트, GPL 라이선스와 기본 데모 BVH만 포함합니다. 샘플 `.blend`, 테스트, 개발 프로필, 계정 정보, 다운로드된 CMU 모션 파일은 포함하지 않습니다. 소스와 ZIP 모두 Blender 공식 Extension 검증을 거칩니다. 로컬 ZIP은 별도 검증용 Blender 프로필의 **Install from Disk**로 설치할 수 있습니다.
 
 macOS Blender 5.2.0 로컬, 그리고 GitHub Actions의 Ubuntu·Windows 원격 CI에서 격리 회귀 검사 10개, 배포 무결성 검사 4개, ZIP 독립 런타임 검증을 모두 통과했습니다. BVH는 합성 테스트 파일과 실제 CMU 데이터로 Blender 가져오기·리타게팅을 확인했고, FBX는 인덱스·검색 경로만 검사했습니다. Pages 원격 저장소 등록·동기화·설치·업데이트는 깨끗한 인수 프로필에서 실제로 확인했습니다.
 
 ### GitHub 배포 구성
 
-공개 저장소는 [`zzamjak-cloud/CatAni-Blender`](https://github.com/zzamjak-cloud/CatAni-Blender)입니다. `v0.5.0`·`v0.5.1`·`v0.6.0` Release, GitHub Pages 원격 저장소가 모두 게시되어 있습니다.
+공개 저장소는 [`zzamjak-cloud/CatAni-Blender`](https://github.com/zzamjak-cloud/CatAni-Blender)입니다. `v0.5.0`·`v0.5.1`·`v0.6.0`·`v0.6.1` Release, GitHub Pages 원격 저장소가 모두 게시되어 있습니다.
 
 | 워크플로 | 실행 조건 | 수행 내용 |
 | --- | --- | --- |

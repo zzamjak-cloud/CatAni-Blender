@@ -92,7 +92,7 @@ joined = " ".join(main["labels"])
 for entry in CATALOG:
     assert entry.license_note not in joined, "이용 조건 원문이 주 패널에 노출되었습니다"
     assert entry.source_name not in joined, "출처 문구가 주 패널에 노출되었습니다"
-assert {"catani.motion_info", "catani.settings"} <= set(main["operators"]), main["operators"]
+assert {"catani.motion_info", "catani.settings", "catani.library_guide"} <= set(main["operators"]), main["operators"]
 
 # 라이선스 계약: 비상업 출처는 토글을 켜야만 목록에 들어오고 배지로 구분된다.
 settings.motion_library_path = ""
@@ -132,6 +132,15 @@ detail = record(addon.CATANI_OT_settings.draw, bpy.context)
 assert {"motion_library_path", "frame_step", "use_location", "hide_source"} <= set(detail["properties"]), detail["properties"]
 assert {"catani.motion_refresh", "catani.motion_download", "catani.motion_import"} <= set(detail["operators"]), detail["operators"]
 assert any("적용 리포트" in label for label in detail["labels"]), detail["labels"]
+assert {"catani.library_open", "catani.library_guide"} <= set(detail["operators"]), detail["operators"]
+
+# 보관 위치 팝업이 현재 폴더·기본 위치·업데이트 안내와 폴더 열기 버튼을 담는지.
+guide = record(addon.CATANI_OT_library_guide.draw, bpy.context)
+packed_guide = " ".join(guide["labels"]).replace(" ", "")
+assert addon.user_library_path().replace(" ", "") in packed_guide, "팝업에 기본 보관 위치가 없습니다"
+assert "업데이트" in packed_guide and "사용자데이터폴더" in packed_guide, guide["labels"]
+assert {"catani.library_open", "catani.library_migrate"} <= set(guide["operators"]), guide["operators"]
+assert "가져오기" in packed_guide, guide["labels"]
 
 # 받아 둔 BVH는 머리글만 읽어 길이를 표시한다. 표본 프레임은 읽지 않는다.
 temporary = tempfile.TemporaryDirectory(prefix="catani-ui-contract-")

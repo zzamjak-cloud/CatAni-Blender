@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "catani"
-version = "0.6.0"
+version = "0.6.1"
 name = "CatAni"
 tagline = "공개 모션 5,908종을 검색해 캐릭터에 바로 적용"
 maintainer = "CatAni"

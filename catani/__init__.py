@@ -3,7 +3,10 @@
 import math
 import os
 from pathlib import Path
+import shutil
+import tempfile
 import textwrap
+import time
 
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
@@ -11,7 +14,8 @@ from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatPrope
 from . import retarget
 from .motion_downloader import DownloadJob
 from .motion_import import import_asset
-from .motion_library import MotionAsset, browse, bundled_library_path, normalize_tags, read_length, update_manifest
+from .motion_library import (MotionAsset, browse, bundled_library_path, merge_manifest, normalize_tags, read_length,
+                              read_manifest, update_manifest)
 from .source_catalog import CATEGORIES, get_source
 
 # {"download": DownloadJob, "scene": Scene, "apply": bool, "preview": bool, "path": str}
@@ -19,6 +23,7 @@ _job = None
 
 # 목록 길이 표시용 BVH 머리글 캐시. 패널은 자주 다시 그려지므로 mtime으로만 다시 읽는다.
 _lengths = {}
+_library_counts = {}  # {폴더: (측정 시각, BVH 개수)}
 _LIST_ROWS = 18  # 좁은 사이드바에서도 샘플을 한눈에 훑을 수 있는 최소 줄 수
 _EDIT_CATEGORY_ITEMS = [(key, label, f"{label}로 분류합니다")
                         for key, label in sorted(CATEGORIES.items(), key=lambda pair: pair[1])]
@@ -34,6 +39,88 @@ def user_library_path():
         return bpy.utils.user_resource("DATAFILES", path="catani/motions", create=False)
     except Exception:
         return str(bundled_library_path())
+
+
+def _library_root(settings):
+    """지금 쓰는 모션 폴더. 비워 두면 기본 사용자 폴더를 본다."""
+    raw = (settings.motion_library_path or "").strip()
+    return Path(bpy.path.abspath(raw)) if raw else Path(user_library_path())
+
+
+def _library_count(root):
+    """팝업은 자주 다시 그려지므로 폴더 훑기를 잠깐 캐시한다."""
+    key = str(root)
+    stamp = time.monotonic()
+    cached = _library_counts.get(key)
+    if cached is not None and stamp - cached[0] < 3.0:
+        return cached[1]
+    try:
+        count = sum(1 for _ in root.rglob("*.bvh")) if root.is_dir() else 0
+    except OSError:
+        count = 0
+    _library_counts[key] = (stamp, count)
+    return count
+
+
+def _sibling_libraries(current):
+    """Blender 버전을 올리면 datafiles 경로가 바뀐다. 이전 버전 폴더에 남은 모션을 찾아 준다."""
+    try:
+        default = Path(user_library_path())
+        versions = default.parents[2]
+    except (IndexError, OSError):
+        return []
+    found = []
+    try:
+        entries = sorted(versions.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        candidate = entry / "datafiles" / "catani" / "motions"
+        if candidate in (current, default) or not candidate.is_dir():
+            continue
+        try:
+            if next(candidate.rglob("*.bvh"), None) is not None:
+                found.append(candidate)
+        except OSError:
+            continue
+    return found
+
+
+def _import_library(source, target):
+    """다른 폴더의 BVH와 인덱스를 현재 모션 폴더로 합친다. 같은 이름의 기존 파일은 건드리지 않는다."""
+    copied = skipped = 0
+    try:
+        catalog = read_manifest(source)
+    except ValueError:
+        catalog = {}  # 인덱스가 깨졌어도 파일은 옮긴다. 이름은 카탈로그 경로로 복원된다.
+    meta = {}
+    for path in sorted(source.rglob("*.bvh")):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        relative = path.relative_to(source)
+        key = str(relative).replace("\\", "/")
+        entry = catalog.get(key)
+        if entry:
+            meta[key] = {name: value for name, value in entry.items() if name != "file"}
+        destination = target / relative
+        if destination.exists():
+            skipped += 1
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".catani-import-", suffix=".part", delete=False) as stream:
+                temporary = Path(stream.name)
+            shutil.copy2(path, temporary)
+            os.replace(temporary, destination)
+            temporary = None
+            copied += 1
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    if meta:
+        merge_manifest(target, meta)
+    return copied, skipped
 
 
 def _redraw():
@@ -795,6 +882,159 @@ class CATANI_OT_motion_info(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CATANI_OT_library_open(bpy.types.Operator):
+    bl_idname = "catani.library_open"
+    bl_label = "모션 폴더 열기"
+    bl_description = "내려받은 모션이 들어 있는 폴더를 운영체제 파일 탐색기에서 엽니다"
+
+    path: StringProperty(default="", options={"HIDDEN"})
+
+    def execute(self, context):
+        raw = self.path.strip()
+        target = Path(bpy.path.abspath(raw)) if raw else _library_root(context.scene.catani_settings)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self.report({"ERROR"}, f"모션 폴더를 열 수 없습니다: {error}")
+            return {"CANCELLED"}
+        bpy.ops.wm.path_open(filepath=str(target))
+        self.report({"INFO"}, f"모션 폴더를 열었습니다: {target}")
+        return {"FINISHED"}
+
+
+class CATANI_OT_library_use(bpy.types.Operator):
+    bl_idname = "catani.library_use"
+    bl_label = "이 폴더 사용"
+    bl_description = "이 폴더를 모션 폴더로 지정하고 목록을 다시 읽습니다"
+
+    path: StringProperty(default="", options={"HIDDEN"})
+
+    def execute(self, context):
+        settings = context.scene.catani_settings
+        settings.motion_library_path = self.path.strip() or user_library_path()
+        self.report({"INFO"}, f"모션 폴더를 {settings.motion_library_path}로 바꿨습니다.")
+        return {"FINISHED"}
+
+
+class CATANI_OT_library_migrate(bpy.types.Operator):
+    bl_idname = "catani.library_migrate"
+    bl_label = "모션 가져오기"
+    bl_description = "다른 폴더(이전 Blender 버전 폴더 등)의 모션을 현재 모션 폴더로 한 번에 옮겨 옵니다"
+
+    directory: StringProperty(subtype="DIR_PATH", default="", options={"HIDDEN"})
+    filter_folder: BoolProperty(default=True, options={"HIDDEN"})
+    browse: BoolProperty(default=True, options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        if not self.browse and self.directory.strip():
+            return self.execute(context)
+        if not self.directory.strip():
+            # 탐색창을 이전 Blender 버전 폴더에서 열어 준다.
+            others = _sibling_libraries(_library_root(context.scene.catani_settings))
+            self.directory = f"{others[0]}{os.sep}" if others else ""
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        settings = context.scene.catani_settings
+        raw = self.directory.strip()
+        if not raw:
+            self.report({"ERROR"}, "가져올 폴더를 고르세요.")
+            return {"CANCELLED"}
+        source = Path(bpy.path.abspath(raw)).resolve()
+        if not source.is_dir():
+            self.report({"ERROR"}, f"폴더를 찾을 수 없습니다: {source}")
+            return {"CANCELLED"}
+        target = _library_root(settings)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self.report({"ERROR"}, f"모션 폴더를 만들 수 없습니다: {error}")
+            return {"CANCELLED"}
+        target = target.resolve()
+        if source == target:
+            self.report({"ERROR"}, "현재 모션 폴더와 같은 폴더입니다.")
+            return {"CANCELLED"}
+        if target.is_relative_to(source):
+            self.report({"ERROR"}, "현재 모션 폴더를 품고 있는 폴더는 가져올 수 없습니다.")
+            return {"CANCELLED"}
+        context.window_manager.progress_begin(0, 1)
+        try:
+            copied, skipped = _import_library(source, target)
+        except (OSError, ValueError) as error:
+            self.report({"ERROR"}, f"가져오지 못했습니다: {error}")
+            return {"CANCELLED"}
+        finally:
+            context.window_manager.progress_end()
+        _library_counts.pop(str(target), None)
+        refresh(context.scene)
+        if not copied and not skipped:
+            settings.motion_status = f"가져올 BVH가 없습니다: {source}"
+            self.report({"WARNING"}, settings.motion_status)
+            return {"CANCELLED"}
+        already = f" · 이미 있던 {skipped}개는 그대로 뒀습니다" if skipped else ""
+        settings.motion_status = f"모션 {copied}개를 가져왔습니다{already}"
+        self.report({"INFO"}, settings.motion_status)
+        return {"FINISHED"}
+
+
+class CATANI_OT_library_guide(bpy.types.Operator):
+    bl_idname = "catani.library_guide"
+    bl_label = "모션 폴더 · 보관 위치"
+    bl_description = "받아 둔 모션이 어디에 남는지 보고, 폴더를 열거나 이전 Blender 버전 폴더를 다시 연결합니다"
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_popup(self, width=560)
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.catani_settings
+        root = _library_root(settings)
+        default = Path(user_library_path())
+        count = _library_count(root)
+        column = layout.column(align=True)
+        column.label(text="현재 모션 폴더", icon="FILE_FOLDER")
+        _lines(column, str(root), 78)
+        if count:
+            column.label(text=f"BVH {count}개를 보관 중입니다.")
+        elif root.is_dir():
+            column.label(text="폴더는 있지만 받아 둔 모션이 아직 없습니다.")
+        else:
+            column.label(text="아직 폴더가 없습니다. 처음 받을 때 자동으로 만듭니다.")
+        row = layout.row(align=True)
+        row.operator("catani.library_open", text="폴더 열기", icon="FILE_FOLDER").path = ""
+        migrate = row.operator("catani.library_migrate", text="모션 가져오기", icon="IMPORT")
+        migrate.directory = ""
+        migrate.browse = True
+        if root != default:
+            row.operator("catani.library_use", text="기본 위치로", icon="LOOP_BACK").path = ""
+        layout.separator()
+        guide = layout.box().column(align=True)
+        guide.label(text="애드온을 업데이트해도 받은 모션은 그대로입니다", icon="INFO")
+        _lines(guide, "받은 파일은 애드온 설치 폴더가 아니라 Blender 사용자 데이터 폴더에 남습니다. "
+                      "그래서 CatAni를 업데이트하거나 지웠다 다시 설치해도 지워지지 않습니다.", 78)
+        _lines(guide, "다만 Blender 자체를 새 버전으로 올리면 버전별 폴더를 새로 봅니다. 이때는 모션 가져오기로 이전 버전 "
+                      "폴더를 고르면 받아 둔 모션과 이름·분류 인덱스를 한 번에 옮겨 옵니다.", 78)
+        guide.label(text="기본 위치")
+        _lines(guide, str(default), 78)
+        others = _sibling_libraries(root)
+        if not others:
+            return
+        found = layout.box().column(align=True)
+        found.label(text="다른 Blender 버전 폴더에서 받아 둔 모션을 찾았습니다", icon="DUPLICATE")
+        for candidate in others:
+            _lines(found, str(candidate), 78)
+            buttons = found.row(align=True)
+            migrate = buttons.operator("catani.library_migrate", text="여기서 가져오기", icon="IMPORT")
+            migrate.directory = str(candidate)
+            migrate.browse = False
+            buttons.operator("catani.library_use", text="이 폴더 사용", icon="CHECKMARK").path = str(candidate)
+            buttons.operator("catani.library_open", text="열기", icon="FILE_FOLDER").path = str(candidate)
+
+    def execute(self, _context):
+        return {"FINISHED"}
+
+
 class CATANI_OT_settings(bpy.types.Operator):
     bl_idname = "catani.settings"
     bl_label = "상세 설정 · 적용 리포트"
@@ -808,6 +1048,9 @@ class CATANI_OT_settings(bpy.types.Operator):
         settings = context.scene.catani_settings
         column = layout.column()
         column.prop(settings, "motion_library_path")
+        folder = column.row(align=True)
+        folder.operator("catani.library_open", text="폴더 열기", icon="FILE_FOLDER").path = ""
+        folder.operator("catani.library_guide", text="보관 위치 안내", icon="QUESTION")
         column.prop(settings, "frame_step")
         column.prop(settings, "smooth_window")
         column.prop(settings, "simplify_error")
@@ -885,7 +1128,9 @@ class CATANI_PT_main(bpy.types.Panel):
             layout.progress(factor=settings.download_progress, text=settings.download_status[:48])
             layout.operator("catani.download_cancel", icon="X")
         _lines(layout, settings.motion_status)
-        layout.operator("catani.settings", text="상세 설정", icon="PREFERENCES")
+        footer = layout.row(align=True)
+        footer.operator("catani.settings", text="상세 설정", icon="PREFERENCES")
+        footer.operator("catani.library_guide", text="모션 폴더", icon="FILE_FOLDER")
 
 
 _classes = (
@@ -893,7 +1138,9 @@ _classes = (
     CATANI_OT_motion_refresh, CATANI_OT_motion_apply, CATANI_OT_motion_import,
     CATANI_OT_motion_preview, CATANI_OT_preview_clear,
     CATANI_OT_motion_download, CATANI_OT_download_cancel,
-    CATANI_OT_motion_rename, CATANI_OT_motion_info, CATANI_OT_settings,
+    CATANI_OT_motion_rename, CATANI_OT_motion_info,
+    CATANI_OT_library_open, CATANI_OT_library_use, CATANI_OT_library_migrate, CATANI_OT_library_guide,
+    CATANI_OT_settings,
     CATANI_PT_main,
 )
 

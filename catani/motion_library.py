@@ -120,19 +120,26 @@ def catalog_entry_for(relative="", download_url=""):
 
 def update_manifest(directory, relative, fields):
     """motions.json의 항목 하나를 갱신한다. 임시 파일에 쓰고 교체해 중간 상태를 남기지 않는다."""
+    key = str(relative).replace("\\", "/")
+    return merge_manifest(directory, {key: fields})[key]
+
+
+def merge_manifest(directory, entries):
+    """여러 항목을 한 번에 합친다. 폴더를 통째로 가져올 때 파일마다 다시 쓰지 않기 위한 경로다."""
     library = Path(directory).expanduser().resolve()
     if not library.is_dir():
         raise ValueError(f"모션 폴더를 찾을 수 없습니다: {library}")
-    key = str(relative).replace("\\", "/")
-    if not key or Path(key).is_absolute() or ".." in Path(key).parts:
-        raise ValueError("모션 폴더 안의 상대 경로만 기록할 수 있습니다.")
     manifest = read_manifest(library)
     index = library / "motions.json"
     document = json.loads(index.read_text(encoding="utf-8")) if index.exists() else {"schema_version": 1}
-    entry = dict(manifest.get(key, {}))
-    entry.update(fields)
-    entry["file"] = key
-    manifest[key] = entry
+    for relative, fields in entries.items():
+        key = str(relative).replace("\\", "/")
+        if not key or Path(key).is_absolute() or ".." in Path(key).parts:
+            raise ValueError("모션 폴더 안의 상대 경로만 기록할 수 있습니다.")
+        entry = dict(manifest.get(key, {}))
+        entry.update(fields)
+        entry["file"] = key
+        manifest[key] = entry
     document["motions"] = list(manifest.values())
     temporary = None
     try:
@@ -144,7 +151,7 @@ def update_manifest(directory, relative, fields):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    return entry
+    return manifest
 
 
 def make_asset(filepath, meta=None, relative=""):
