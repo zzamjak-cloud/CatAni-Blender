@@ -650,12 +650,35 @@ def _evaluate(controls, spans, values, low, high, position):
             + 3.0 * one * t * t * controls[1] + t * t * t * values[high])
 
 
+def _merge_segments(segments, fit, tolerance):
+    """이웃한 두 구간을 하나로 다시 적합해 허용치 안이면 합친다.
+
+    쪼개기는 가장 어긋난 지점에서 위에서 아래로 내려가므로 매듭이 최적 위치에 놓이지
+    않는다. 합쳐 보는 패스를 한 번 돌리면 같은 허용치에서 매듭이 눈에 띄게 줄어든다.
+    합친 구간은 다음 순회에서 다시 합침 후보가 되므로 더 못 합칠 때까지 반복한다.
+    """
+    merged = True
+    while merged and len(segments) > 1:
+        merged = False
+        index = 0
+        while index + 1 < len(segments):
+            low, high = segments[index][0], segments[index + 1][1]
+            controls, worst, _chosen = fit(low, high)
+            if worst <= tolerance:
+                segments[index:index + 2] = [(low, high, controls)]
+                merged = True
+            else:
+                index += 1
+    return segments
+
+
 def _fit_group(frames, channels, tolerance, metric):
     """오차 허용치를 지키면서 매듭을 가장 적게 쓰는 베지어 구간들을 만든다.
 
     구간 하나로 맞춰 보고 오차가 넘으면 가장 어긋난 지점에서 쪼갠다. 키를 표본
     프레임에만 놓는 방식과 달리 구간이 데이터에 맞게 휘므로 같은 오차에서 매듭이
-    훨씬 적게 남는다.
+    훨씬 적게 남는다. 쪼갠 뒤에는 이웃 구간을 다시 합쳐 보아 하향식 쪼개기가 남긴
+    불필요한 매듭을 걷어낸다.
 
     돌려주는 값은 (매듭 인덱스, 채널별 구간 제어점)이다.
     """
@@ -695,6 +718,7 @@ def _fit_group(frames, channels, tolerance, metric):
             stack.append((chosen, high))
             stack.append((low, chosen))
         segments.sort()
+        segments = _merge_segments(segments, fit, tolerance)
     else:
         for position in range(count - 1):
             controls, _worst, _chosen = fit(position, position + 1)

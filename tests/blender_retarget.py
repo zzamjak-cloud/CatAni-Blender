@@ -293,6 +293,42 @@ assert abs(abs(tight["facing_angle"]) - abs(skew)) < 0.5, (tight["facing_angle"]
 assert abs(tight["max_direction_error"] - loose["max_direction_error"]) < 0.01, (tight["max_direction_error"], loose["max_direction_error"])
 bpy.data.objects.remove(yawed)
 
+# 11번: 구간 병합. 하향식 쪼개기가 남긴 매듭이 더 합칠 수 없는 상태까지 줄어야 한다.
+probe_frames = list(range(1, 241))
+probe = [[math.sin(value / 11.0) * math.cos(value / 29.0) for value in probe_frames]]
+probe_tolerance = 0.01
+
+
+def spread(actual, predicted):
+    """검사용 스칼라 채널의 절대 오차."""
+    return abs(actual[0] - predicted[0])
+
+
+def worst_fit(low, high):
+    """구간 하나를 적합했을 때의 최대 오차."""
+    width = float(probe_frames[high] - probe_frames[low]) or 1.0
+    spans = {point: (probe_frames[point] - probe_frames[low]) / width for point in range(low, high + 1)}
+    controls = [retarget._solve_handles(spans, values, low, high) for values in probe]
+    return max((spread(tuple(values[point] for values in probe),
+                       tuple(retarget._evaluate(control, spans, values, low, high, point)
+                             for control, values in zip(controls, probe)))
+                for point in range(low + 1, high)), default=0.0)
+
+
+merged_knots, merged_segments = retarget._fit_group(probe_frames, probe, probe_tolerance, spread)
+keep = retarget._merge_segments
+retarget._merge_segments = lambda segments, fit, tolerance: segments
+try:
+    split_knots, _split_segments = retarget._fit_group(probe_frames, probe, probe_tolerance, spread)
+finally:
+    retarget._merge_segments = keep
+assert len(merged_knots) < len(split_knots), (len(merged_knots), len(split_knots))
+for position in range(len(merged_segments) - 1):
+    low, high = merged_segments[position][0], merged_segments[position + 1][1]
+    assert worst_fit(low, high) > probe_tolerance, (position, worst_fit(low, high))
+for low, high, _controls in merged_segments:
+    assert worst_fit(low, high) <= probe_tolerance, (low, high, worst_fit(low, high))
+
 # 다른 프로세스에서 재현을 확인할 예제 파일. 굽힌 포즈를 함께 적어 둔다.
 assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
 baked = target.animation_data.action.frame_range
@@ -315,4 +351,5 @@ temporary.cleanup()
 print(f"CATANI_PASS 합성 CMU BVH 22부위 리타게팅·최대 방향 오차 {worst:.4f}°·접지·NLA/IK 차단·재적용·실패 경로·"
       f"간소화 키 {simplified_keys}/{dense_keys}개 방향 오차 {worst_simplified:.4f}°·"
       f"IK 전환 {len(setups)}체인 방향 오차 {ik_worst:.4f}°·"
-      f"정면 정렬 {skew:+.1f}° → {aligned:+.2f}°")
+      f"정면 정렬 {skew:+.1f}° → {aligned:+.2f}°·"
+      f"구간 병합 매듭 {len(split_knots)}→{len(merged_knots)}개")
