@@ -9,7 +9,13 @@ def _limb(side, sign):
         (f"{side}Shoulder", (3.0 * sign, 3.0, 0.0), [
             (f"{side}Arm", (4.0 * sign, 0.0, 0.0), [
                 (f"{side}ForeArm", (5.0 * sign, 0.0, 0.0), [
-                    (f"{side}Hand", (4.0 * sign, 0.0, 0.0), []),
+                    (f"{side}Hand", (4.0 * sign, 0.0, 0.0), [
+                        # CMU 실제 파일처럼 오프셋 0인 손가락 뿌리를 둔다. 손 본의 길이를
+                        # 알 수 없어 가져오기가 방향을 지어내는 경로를 검사한다.
+                        (f"{side}FingerBase", (0.0, 0.0, 0.0), [
+                            (f"{side}HandIndex1", (1.2 * sign, 0.0, 0.0), []),
+                        ]),
+                    ]),
                 ]),
             ]),
         ]),

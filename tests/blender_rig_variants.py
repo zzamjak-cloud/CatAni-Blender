@@ -133,10 +133,14 @@ for variant in VARIANTS:
     source = next(obj for obj in bpy.data.objects if obj.get("catani_motion_source"))
     scene = bpy.context.scene
     worst = 0.0
+    # 모션 파일이 길이를 담고 있지 않아 가져오기가 방향을 지어낸 본은 그 방향에 맞추지
+    # 않으므로 비교에서 뺀다. 굽기 쪽 verify()도 같은 기준으로 센다.
+    aimed = [item for item in pairs if not retarget._invented_direction(source, source.data.bones[item[1]])]
+    assert len(aimed) < len(pairs), f"{variant}: 검사용 BVH에 방향을 알 수 없는 관절이 있어야 한다"
     for frame in range(scene.frame_start, scene.frame_end + 1):
         scene.frame_set(frame)
         bpy.context.view_layer.update()
-        for _slot, source_bone, target_bone in pairs:
+        for _slot, source_bone, target_bone in aimed:
             worst = max(worst, math.degrees(direction(source, source_bone).angle(direction(target, target_bone), 0.0)))
     assert worst < 0.5, f"{variant}: 본 방향 오차 {worst:.3f}°"
     assert "적용됨" in settings.motion_status, settings.motion_status

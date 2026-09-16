@@ -71,14 +71,20 @@ span = scene.frame_end - scene.frame_start + 1
 worst = 0.0
 moved = {name: 0.0 for _slot, _src, name in pairs}
 first = {}
+# 모션 파일이 길이를 담고 있지 않아 가져오기가 방향을 지어낸 본은 그 방향에 맞추지
+# 않으므로 비교에서 뺀다. 굽기 쪽 verify()도 같은 기준으로 센다.
+aimed = [item for item in pairs if not retarget._invented_direction(source, source.data.bones[item[1]])]
+assert len(aimed) < len(pairs), "검사용 BVH에 방향을 알 수 없는 관절이 있어야 한다"
 for frame in range(scene.frame_start, scene.frame_end + 1):
     scene.frame_set(frame)
     bpy.context.view_layer.update()
     for _slot, source_bone, target_bone in pairs:
-        from_source, from_target = direction(source, source_bone), direction(target, target_bone)
-        worst = max(worst, math.degrees(from_source.angle(from_target, 0.0)))
+        from_target = direction(target, target_bone)
         first.setdefault(target_bone, from_target.copy())
         moved[target_bone] = max(moved[target_bone], math.degrees(first[target_bone].angle(from_target, 0.0)))
+    for _slot, source_bone, target_bone in aimed:
+        from_source, from_target = direction(source, source_bone), direction(target, target_bone)
+        worst = max(worst, math.degrees(from_source.angle(from_target, 0.0)))
 assert worst < 0.5, f"본 방향이 모션과 어긋났습니다: 최대 {worst:.3f}°"
 assert sum(1 for value in moved.values() if value > 3.0) >= 6, f"실제로 움직인 본이 너무 적습니다: {moved}"
 
@@ -188,7 +194,7 @@ lowest_simplified = None
 for frame in range(scene.frame_start, scene.frame_end + 1):
     scene.frame_set(frame)
     bpy.context.view_layer.update()
-    for _slot, source_bone, target_bone in pairs:
+    for _slot, source_bone, target_bone in aimed:
         gap = direction(source, source_bone).angle(direction(target, target_bone), 0.0)
         worst_simplified = max(worst_simplified, math.degrees(gap))
     for name in foot_bones:
@@ -235,7 +241,7 @@ ik_lowest = None
 for frame in range(scene.frame_start, scene.frame_end + 1):
     scene.frame_set(frame)
     bpy.context.view_layer.update()
-    for _slot, source_bone, target_bone in pairs:
+    for _slot, source_bone, target_bone in aimed:
         gap = direction(source, source_bone).angle(direction(target, target_bone), 0.0)
         ik_worst = max(ik_worst, math.degrees(gap))
     for name in foot_bones:
@@ -292,6 +298,64 @@ assert abs(abs(tight["facing_angle"]) - abs(skew)) < 0.5, (tight["facing_angle"]
 # 정렬은 방위만 돌리므로 모션 충실도(검증 오차)를 흔들면 안 된다.
 assert abs(tight["max_direction_error"] - loose["max_direction_error"]) < 0.01, (tight["max_direction_error"], loose["max_direction_error"])
 bpy.data.objects.remove(yawed)
+
+# 12번 준비: 지어낸 방향 판별기가 두 형태를 모두 잡고 진짜 짧은 본은 놓아주는지.
+probe_armature = bpy.data.armatures.new("CatAni 판별 검사")
+probe_object = bpy.data.objects.new("CatAni 판별 검사", probe_armature)
+scene.collection.objects.link(probe_object)
+bpy.context.view_layer.objects.active = probe_object
+bpy.ops.object.mode_set(mode="EDIT")
+long_bone = probe_armature.edit_bones.new("long")
+long_bone.head, long_bone.tail = (0.0, 0.0, 0.0), (0.0, 10.0, 0.0)
+stub = probe_armature.edit_bones.new("stub")           # End Site 없는 말단
+stub.head, stub.tail, stub.parent = (0.0, 10.0, 0.0), (0.0, 10.05, 0.0), long_bone
+short = probe_armature.edit_bones.new("short")         # 진짜 짧은 본(발끝)
+short.head, short.tail, short.parent = (1.0, 10.0, 0.0), (1.0, 11.5, 0.0), long_bone
+overlap = probe_armature.edit_bones.new("overlap")     # 자식이 제 머리에 겹친 관절
+overlap.head, overlap.tail, overlap.parent = (2.0, 0.0, 0.0), (2.0, 0.1, 0.0), long_bone
+twin = probe_armature.edit_bones.new("twin")
+twin.head, twin.tail, twin.parent = (2.0, 0.0, 0.0), (5.0, 0.0, 0.0), overlap
+bpy.ops.object.mode_set(mode="OBJECT")
+assert retarget._invented_direction(probe_object, probe_armature.bones["stub"]), "End Site 없는 말단을 놓쳤습니다"
+assert retarget._invented_direction(probe_object, probe_armature.bones["overlap"]), "겹친 자식 관절을 놓쳤습니다"
+assert not retarget._invented_direction(probe_object, probe_armature.bones["short"]), "진짜 짧은 본을 잘못 걸렀습니다"
+assert not retarget._invented_direction(probe_object, probe_armature.bones["long"])
+bpy.data.objects.remove(probe_object)
+bpy.data.armatures.remove(probe_armature)
+bpy.context.view_layer.objects.active = target
+
+# 12번: 모션 파일이 손 관절의 길이를 담고 있지 않을 때(CMU가 그렇다) 가져오기가 지어낸
+# 방향에 캐릭터 손을 맞추면 손목이 통째로 꺾인다. 손목 굽힘이 원본과 같아야 한다.
+hand_source, hand_target = next((s_bone, t_bone) for slot, s_bone, t_bone in pairs if slot == "hand_l")
+fore_source, fore_target = next((s_bone, t_bone) for slot, s_bone, t_bone in pairs if slot == "forearm_l")
+assert retarget._invented_direction(source, source.data.bones[hand_source]),     "검사용 BVH의 손 관절은 방향을 알 수 없어야 한다"
+assert not retarget._invented_direction(source, source.data.bones[fore_source])
+
+
+def wrist(armature, evaluated, child, parent):
+    """부모 대비 자식 회전이 레스트에서 벗어난 각도(도). 리그 규격과 무관하게 비교된다."""
+    rest = (retarget._rotation(armature.matrix_world @ armature.data.bones[parent].matrix_local).inverted()
+            @ retarget._rotation(armature.matrix_world @ armature.data.bones[child].matrix_local))
+    live = (retarget._rotation(evaluated.matrix_world @ evaluated.pose.bones[parent].matrix).inverted()
+            @ retarget._rotation(evaluated.matrix_world @ evaluated.pose.bones[child].matrix))
+    turn = (rest.inverted() @ live).angle
+    return math.degrees(min(turn, math.tau - turn))
+
+
+settings.use_ik = False
+assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
+worst_wrist = 0.0
+for frame in range(int(target.animation_data.action.frame_range[0]),
+                   int(target.animation_data.action.frame_range[1]) + 1):
+    scene.frame_set(frame)
+    bpy.context.view_layer.update()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    worst_wrist = max(worst_wrist, abs(wrist(source, source.evaluated_get(depsgraph), hand_source, fore_source)
+                                       - wrist(target, target.evaluated_get(depsgraph), hand_target, fore_target)))
+assert worst_wrist < 2.0, f"손목 굽힘이 원본과 어긋납니다: 최대 {worst_wrist:.2f}°"
+# 지어낸 방향은 맞출 수 없으므로 방향 오차 계산에서도 빠져야 한다.
+assert "모션 본 방향 없음" in settings.apply_report, settings.apply_report
+assert hand_target in settings.apply_report.split("모션 본 방향 없음")[1].splitlines()[0], settings.apply_report
 
 # 11번: 구간 병합. 하향식 쪼개기가 남긴 매듭이 더 합칠 수 없는 상태까지 줄어야 한다.
 probe_frames = list(range(1, 241))
@@ -352,4 +416,5 @@ print(f"CATANI_PASS 합성 CMU BVH 22부위 리타게팅·최대 방향 오차 {
       f"간소화 키 {simplified_keys}/{dense_keys}개 방향 오차 {worst_simplified:.4f}°·"
       f"IK 전환 {len(setups)}체인 방향 오차 {ik_worst:.4f}°·"
       f"정면 정렬 {skew:+.1f}° → {aligned:+.2f}°·"
-      f"구간 병합 매듭 {len(split_knots)}→{len(merged_knots)}개")
+      f"구간 병합 매듭 {len(split_knots)}→{len(merged_knots)}개·"
+      f"손목 굽힘 오차 {worst_wrist:.2f}°")
