@@ -66,13 +66,17 @@ def _hierarchy(node, depth=1):
     return lines
 
 
-def write_bvh(path):
-    """관절마다 다른 회전과 루트 이동이 들어간 합성 모션을 만든다."""
+def write_bvh(path, yaw=0.0):
+    """관절마다 다른 회전과 루트 이동이 들어간 합성 모션을 만든다.
+
+    `yaw`는 루트에 상수로 얹는 수직축 회전(도)이다. 모캡 라이브러리마다 배우가 향한
+    방향이 다른 상황을 그대로 재현해 정면 정렬을 검사한다.
+    """
     order = _joints(TREE)
     rows = []
     for frame in range(FRAMES):
         phase = frame / (FRAMES - 1)
-        values = [0.0, 17.0 + 1.5 * math.sin(phase * math.tau), 6.0 * phase, 0.0, 0.0, 4.0 * phase]
+        values = [0.0, 17.0 + 1.5 * math.sin(phase * math.tau), 6.0 * phase, 0.0, 0.0, yaw + 4.0 * phase]
         for name in order[1:]:
             base = ROTATED.get(name, (0.0, 0.0, 0.0))
             values.extend(component * phase for component in base)

@@ -7,6 +7,8 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 Y_AXIS = Vector((0.0, 1.0, 0.0))
+X_AXIS = Vector((1.0, 0.0, 0.0))
+Z_AXIS = Vector((0.0, 0.0, 1.0))
 MIN_PAIRS = 3
 # 뼈 하나에 프레임당 쿼터니언 4채널을 쓰므로 상한을 두어 굽기 폭주를 막는다.
 MAX_KEYFRAMES = 2_000_000
@@ -244,6 +246,43 @@ def _roll_correction(source, source_bone, target, target_bone):
     return (align @ source_rest).inverted() @ target_rest
 
 
+def _flat(vector):
+    """수평면에 투영한 방위 벡터. 거의 수직이면 None."""
+    flat = Vector((vector.x, vector.y))
+    return flat.normalized() if flat.length > 1e-4 else None
+
+
+def _facing_axis(rotation):
+    """엉덩이 본 좌표계에서 수평으로 누워 있는 축. 방위를 재는 기준으로 쓴다."""
+    return next((axis for axis in (X_AXIS, Z_AXIS) if _flat(rotation @ axis) is not None), None)
+
+
+def _facing_correction(context, source, target, pairs, frames, corrections):
+    """첫 프레임의 모션 정면을 캐릭터 레스트 정면에 맞추는 수직축 회전.
+
+    모캡 라이브러리는 배우가 캡처 공간에서 향한 방향이 클립마다 다르므로, 본 방향을
+    그대로 옮기면 캐릭터가 옆이나 뒤를 본 채 생성된다. 기울기까지 건드리면 누운 모션이
+    깨지므로 세계 Z축 둘레의 방위각만 되돌린다.
+    """
+    hips = next(((source_bone, target_bone) for slot, source_bone, target_bone in pairs if slot == "hips"), None)
+    if hips is None:
+        return Quaternion(), 0.0
+    source_bone, target_bone = hips
+    rest = _rotation(_rest_world(target, target.data.bones[target_bone]))
+    axis = _facing_axis(rest)
+    if axis is None:
+        return Quaternion(), 0.0
+    context.scene.frame_set(frames[0])
+    source_eval = source.evaluated_get(context.evaluated_depsgraph_get())
+    motion = _rotation(source_eval.matrix_world @ source_eval.pose.bones[source_bone].matrix)
+    current = _flat(motion @ corrections[target_bone] @ axis)
+    wanted = _flat(rest @ axis)
+    if current is None or wanted is None:
+        return Quaternion(), 0.0
+    angle = math.atan2(current.x * wanted.y - current.y * wanted.x, current.x * wanted.x + current.y * wanted.y)
+    return Quaternion(Z_AXIS, angle), angle
+
+
 def _hierarchy(armature):
     order = []
     stack = [bone for bone in armature.data.bones if bone.parent is None]
@@ -451,7 +490,7 @@ def _leading_calibration(context, source, pairs, frames, limit=3):
     return dropped
 
 
-def _sample(context, source, target, pairs, frames, corrections, translation_scale, ground=True, smooth=0):
+def _sample(context, source, target, pairs, frames, corrections, translation_scale, ground=True, smooth=0, facing=None):
     """프레임별로 캐릭터 본의 로컬 회전과 엉덩이 이동을 계산한다."""
     scene = context.scene
     order = _hierarchy(target)
@@ -464,6 +503,7 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
     ground_bones = [target_bone for slot, _source, target_bone in pairs if slot.startswith(("foot", "toe"))]
     hips_targets = []
     penetration = []
+    facing = Quaternion() if facing is None else facing
     target_basis = target.matrix_world.copy()
     target_inverse = target_basis.inverted()
     target_rotation = _rotation(target_basis).inverted()
@@ -487,13 +527,13 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
                 pose[bone.name] = base
                 continue
             motion = _rotation(source_world @ source_eval.pose.bones[source_bone].matrix)
-            desired = target_rotation @ motion @ corrections[bone.name]
+            desired = target_rotation @ facing @ motion @ corrections[bone.name]
             location = base.to_translation()
             if bone.name == hips:
                 current = (source_world @ source_eval.pose.bones[source_bone].matrix).translation
                 if origin is None:
                     origin = current.copy()
-                world_target = hips_rest_world + (current - origin) * translation_scale
+                world_target = hips_rest_world + facing @ ((current - origin) * translation_scale)
                 hips_targets.append(world_target)
                 location = target_inverse @ world_target
             matrix = Matrix.LocRotScale(location, desired, Vector((1.0, 1.0, 1.0)))
@@ -945,8 +985,9 @@ def deepest_penetration(context, target, frames, floor):
     return worst
 
 
-def verify(context, source, target, pairs, frames):
+def verify(context, source, target, pairs, frames, facing=None):
     """구운 결과에서 두 리그의 본 방향 차이를 도 단위 최대값으로 돌려준다."""
+    facing = Quaternion() if facing is None else facing
     scene = context.scene
     worst = 0.0
     for frame in frames:
@@ -955,14 +996,15 @@ def verify(context, source, target, pairs, frames):
         source_eval = source.evaluated_get(depsgraph)
         target_eval = target.evaluated_get(depsgraph)
         for _slot, source_bone, target_bone in pairs:
-            from_source = _rotation(source_eval.matrix_world @ source_eval.pose.bones[source_bone].matrix) @ Y_AXIS
+            from_source = facing @ (_rotation(source_eval.matrix_world @ source_eval.pose.bones[source_bone].matrix) @ Y_AXIS)
             from_target = _rotation(target_eval.matrix_world @ target_eval.pose.bones[target_bone].matrix) @ Y_AXIS
             worst = max(worst, math.degrees(from_source.angle(from_target, 0.0)))
     return worst
 
 
 def apply_motion(context, source, target, *, step=1, use_location=True, ground=True,
-                 simplify=DEFAULT_SIMPLIFY, smooth=DEFAULT_SMOOTH, use_ik=False, name="CatAni 모션"):
+                 simplify=DEFAULT_SIMPLIFY, smooth=DEFAULT_SMOOTH, use_ik=False, align_facing=True,
+                 name="CatAni 모션"):
     """모션 리그의 동작을 캐릭터에 굽고 적용 결과 보고서를 돌려준다."""
     for obj in (source, target):
         if obj is None or obj.type != "ARMATURE":
@@ -994,6 +1036,7 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
     target_height = _height(target, target_bones)
     translation_scale = target_height / source_height if use_location and source_height > 1e-5 and target_height > 1e-5 else 0.0
     corrections = {target_bone: _roll_correction(source, source.data.bones[source_bone], target, target.data.bones[target_bone]) for _slot, source_bone, target_bone in pairs}
+    facing, facing_angle = _facing_correction(context, source, target, pairs, frames, corrections) if align_facing else (Quaternion(), 0.0)
     scene = context.scene
     state = (scene.frame_current, scene.frame_subframe, scene.frame_start, scene.frame_end)
     if target.animation_data and target.animation_data.use_tweak_mode:
@@ -1019,7 +1062,7 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
         target.data.pose_position = "POSE"
         rotations, locations, hips, lift, lifted_frames, poses = _sample(
             context, source, target, pairs, frames, corrections, translation_scale,
-            ground=use_location and ground, smooth=smooth)
+            ground=use_location and ground, smooth=smooth, facing=facing)
         setups = ik_setups(target) if use_ik else []
         # IK가 회전을 직접 풀어 주는 체인 본에는 FK 키를 쓰지 않는다.
         chain = {bone for setup in setups for bone in setup["chain"]}
@@ -1061,7 +1104,7 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
         divisions = 12 if simplify > 0.0 else 6
         samples = sorted({frames[0], frames[-1],
                           *(frames[0] + round(span * index / divisions) for index in range(1, divisions))})
-        error = verify(context, source, target, pairs, samples)
+        error = verify(context, source, target, pairs, samples, facing=facing)
         floor_bones = [target_bone for slot, _source, target_bone in pairs if slot.startswith(("foot", "toe"))]
         rest_floor = _lowest_rest(target, target.matrix_world.copy(), floor_bones) if floor_bones else 0.0
         depth, deep_bone = deepest_penetration(context, target, samples, rest_floor)
@@ -1074,6 +1117,7 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
             "source_profile": profile_label(source_key), "target_profile": profile_label(target_key),
             "target_bone_total": len(target.data.bones), "translation_scale": translation_scale,
             "simplify": simplify, "dense_keyframes": dense, "smooth": smooth, "dropped_frames": dropped,
+            "align_facing": align_facing, "facing_angle": math.degrees(facing_angle),
             "ik": [setup["control"] for setup in setups], "ik_requested": use_ik,
             "ik_effector": ik_effector, "ik_middle": ik_middle,
             "pole_fix": {name: math.degrees(value) for name, value in pole_fix.items()},
@@ -1112,6 +1156,12 @@ def format_report(asset, report):
         f"검증: {', '.join(str(frame) for frame in report['verified_frames'])} 프레임 최대 방향 오차 {report['max_direction_error']:.3f}°"
         + (" · 키가 없는 프레임을 포함해 보간 오차까지 반영" if report["step"] > 1 or report["simplify"] else ""),
     ]
+    if not report["align_facing"]:
+        lines.append("정면 정렬: 없음 · 모션 파일이 향한 방향 그대로 굽습니다")
+    elif abs(report["facing_angle"]) >= 0.05:
+        lines.append(f"정면 정렬: {report['facing_angle']:+.1f}° · 모션 첫 프레임의 정면을 캐릭터 레스트 정면으로 돌렸습니다")
+    else:
+        lines.append("정면 정렬: 보정 불필요 · 모션이 이미 캐릭터 정면을 향합니다")
     if report["dropped_frames"]:
         lines.append(f"선두 보정 프레임 제거: {report['dropped_frames']}개 · 모션 파일 첫 프레임이 T포즈 보정 자세라 그대로 구우면 팝이 남습니다")
     lines.append(f"노이즈 완화: {report['smooth']}프레임 창" if report["smooth"] > 1 else "노이즈 완화: 없음")

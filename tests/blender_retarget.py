@@ -260,6 +260,39 @@ assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
 assert "쓸 수 있는 IK 컨스트레인트가 없어" in settings.apply_report, settings.apply_report
 settings.target_armature = target
 
+# 10번: 정면 정렬. 캡처 방향이 90° 돌아간 모션도 첫 프레임은 캐릭터 정면을 봐야 한다.
+write_bvh(library / "walk_yaw.bvh", yaw=90.0)
+before_yaw = set(bpy.data.objects)
+assert bpy.ops.import_anim.bvh(filepath=str(library / "walk_yaw.bvh"), target="ARMATURE", frame_start=1,
+                               use_fps_scale=True, update_scene_fps=False, update_scene_duration=False) == {"FINISHED"}
+yawed = next(obj for obj in bpy.data.objects if obj not in before_yaw and obj.type == "ARMATURE")
+hips_bone = next(bone for slot, _source, bone in retarget.build_pairs(yawed, target)[0] if slot == "hips")
+rest_side = retarget._rotation(target.matrix_world @ target.data.bones[hips_bone].matrix_local) @ Vector((1.0, 0.0, 0.0))
+
+
+def facing_offset(frame):
+    """캐릭터 엉덩이의 좌우 축이 레스트 대비 몇 도 돌아가 있는지 잰다."""
+    scene.frame_set(frame)
+    bpy.context.view_layer.update()
+    evaluated = target.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    side = retarget._rotation(evaluated.matrix_world @ evaluated.pose.bones[hips_bone].matrix) @ Vector((1.0, 0.0, 0.0))
+    turn = math.atan2(side.y, side.x) - math.atan2(rest_side.y, rest_side.x)
+    return math.degrees((turn + math.pi) % math.tau - math.pi)
+
+
+loose = retarget.apply_motion(bpy.context, yawed, target, use_ik=False, align_facing=False, name="정렬 끔")
+skew = facing_offset(loose["frame_start"])
+assert not loose["align_facing"] and abs(loose["facing_angle"]) < 1e-9, loose["facing_angle"]
+assert abs(abs(skew) - 90.0) < 12.0, f"정렬을 끄면 모션의 캡처 방향이 그대로 남아야 합니다: {skew:.2f}°"
+tight = retarget.apply_motion(bpy.context, yawed, target, use_ik=False, align_facing=True, name="정렬 켬")
+aligned = facing_offset(tight["frame_start"])
+assert tight["align_facing"], tight
+assert abs(aligned) < 0.5, f"정면 정렬 뒤 첫 프레임이 캐릭터 정면을 봐야 합니다: {aligned:.2f}°"
+assert abs(abs(tight["facing_angle"]) - abs(skew)) < 0.5, (tight["facing_angle"], skew)
+# 정렬은 방위만 돌리므로 모션 충실도(검증 오차)를 흔들면 안 된다.
+assert abs(tight["max_direction_error"] - loose["max_direction_error"]) < 0.01, (tight["max_direction_error"], loose["max_direction_error"])
+bpy.data.objects.remove(yawed)
+
 # 다른 프로세스에서 재현을 확인할 예제 파일. 굽힌 포즈를 함께 적어 둔다.
 assert bpy.ops.catani.motion_apply() == {"FINISHED"}, settings.motion_status
 baked = target.animation_data.action.frame_range
@@ -281,4 +314,5 @@ assert hasattr(bpy.types.Scene, "catani_settings")
 temporary.cleanup()
 print(f"CATANI_PASS 합성 CMU BVH 22부위 리타게팅·최대 방향 오차 {worst:.4f}°·접지·NLA/IK 차단·재적용·실패 경로·"
       f"간소화 키 {simplified_keys}/{dense_keys}개 방향 오차 {worst_simplified:.4f}°·"
-      f"IK 전환 {len(setups)}체인 방향 오차 {ik_worst:.4f}°")
+      f"IK 전환 {len(setups)}체인 방향 오차 {ik_worst:.4f}°·"
+      f"정면 정렬 {skew:+.1f}° → {aligned:+.2f}°")

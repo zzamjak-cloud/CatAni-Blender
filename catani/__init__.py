@@ -481,6 +481,9 @@ class CatAniSettings(bpy.types.PropertyGroup):
     use_ik: BoolProperty(name="IK로 전환",
                          description="캐릭터 리그에 IK 컨스트레인트가 있으면 팔다리를 IK 컨트롤 본으로 굽습니다. 체인·폴 구성은 리그의 컨스트레인트에서 직접 읽습니다",
                          default=True)
+    align_facing: BoolProperty(name="정면 정렬",
+                               description="모션 파일마다 다른 캡처 방향을 첫 프레임 기준으로 캐릭터 정면에 맞춥니다. 수직축 회전만 돌리므로 누운 동작의 기울기는 그대로 둡니다",
+                               default=True)
     hide_source: BoolProperty(name="모션 원본 리그 숨기기", default=True)
     download_status: StringProperty(name="다운로드", default="")
     download_progress: FloatProperty(name="진행", min=0.0, max=1.0, subtype="FACTOR")
@@ -557,7 +560,8 @@ class CATANI_OT_motion_apply(bpy.types.Operator):
         try:
             report = retarget.apply_motion(context, source, target, step=settings.frame_step, use_location=settings.use_location,
                                            ground=settings.ground_contact, simplify=math.degrees(settings.simplify_error),
-                                           smooth=settings.smooth_window, use_ik=settings.use_ik, name=f"CatAni {item.name}")
+                                           smooth=settings.smooth_window, use_ik=settings.use_ik,
+                                           align_facing=settings.align_facing, name=f"CatAni {item.name}")
         except Exception:
             if collection is not None:
                 bpy.data.batch_remove(ids=[*created, collection])
@@ -1054,6 +1058,7 @@ class CATANI_OT_settings(bpy.types.Operator):
         column.prop(settings, "frame_step")
         column.prop(settings, "smooth_window")
         column.prop(settings, "simplify_error")
+        column.prop(settings, "align_facing")
         column.prop(settings, "use_location")
         column.prop(settings, "ground_contact")
         column.prop(settings, "use_ik")
