@@ -235,7 +235,11 @@ for bone in target.pose.bones:
         if constraint.type == "IK":
             assert constraint.influence == 1.0, f"{bone.name} IK 영향이 켜지지 않았습니다"
 
-# 간소화를 끈 IK 결과는 FK와 같은 자리에 놓여야 한다.
+# 간소화를 끈 IK 결과는 FK와 같은 자리에 놓여야 한다. 발 고정은 원본 발이 멈춘 구간에서
+# 발을 FK와 다른 자리에 붙잡으므로, 이 정확 재현 검사는 발 고정을 끄고 잰다.
+if bpy.ops.object.mode_set.poll():
+    bpy.ops.object.mode_set(mode="OBJECT")
+retarget.apply_motion(bpy.context, source, target, use_ik=True, simplify=0.0, anchor_feet=False, name="IK 발 고정 끔")
 ik_worst = 0.0
 ik_lowest = None
 for frame in range(scene.frame_start, scene.frame_end + 1):

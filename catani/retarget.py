@@ -27,6 +27,13 @@ DEFAULT_SMOOTH = 0
 # 크라잉(CMU 80_45)의 펴진 다리는 0.03에서 약 4° 과신전으로 들어왔고, 걷기 중 다리는
 # 0.10 위였다. 합성 걷기에서 0.05는 간소화 없는 IK의 방향 오차를 1.2°에 묶었다(0.1은 2.4°).
 POLE_PRIOR_RATIO = 0.05
+# 발 고정: 원본 발이 프레임당 이 비율(다리 길이 기준) 미만으로 움직이면 땅을 딛고 있는
+# 것으로 본다. 실측에서 서 있는 자세(CMU 80_45)의 원본 발은 p95 0.0018, 걷기의 스탠스는
+# 0.003 아래였고 스윙은 0.02 위였다.
+STANCE_SPEED_RATIO = 0.004
+# 스탠스로 인정하는 최소 길이(프레임)와 스탠스 앞뒤로 FK와 섞는 구간(프레임).
+STANCE_MIN_FRAMES = 4
+STANCE_BLEND_FRAMES = 6
 # IK 목표 곡선을 회전 곡선보다 몇 배 조일지. 다리가 거의 펴진 구간에서는 목표를 조금만
 # 옮겨도 무릎 각이 크게 돌아 다리가 튄다. 실측에서 4배면 2°를 넘는 튐이 사라졌고, 더
 # 조여도 이득은 거의 없이 키만 늘었다(01_13에서 16배는 키 +42%에 0.6° 개선).
@@ -347,10 +354,23 @@ def _hierarchy(armature):
 
 
 def _height(obj, bones):
-    """엉덩이에서 발까지의 레스트 길이. 없으면 엉덩이 높이로 대신한다."""
+    """다리 길이(허벅지+정강이 레스트 마디 길이). 이동 척도의 기준이다.
+
+    땅을 딛은 발은 고관절을 중심으로 다리가 도는 만큼 몸을 밀어내므로, 엉덩이 이동은
+    허벅지+정강이 길이 비로 옮겨야 스탠스 동안 발이 미끄러지지 않는다. 엉덩이 본 원점에서
+    발까지의 거리로 재면 골반 오프셋(엉덩이 원점과 고관절 사이)이 리그마다 달라 비가
+    어긋난다. 실측(ACCAD Walk1)에서 그 비는 다리 마디 비보다 30% 작았고, 스탠스 한 번에
+    발이 8.6~9.8cm 미끄러지며 엉덩이가 22cm 들렸다. 다리 마디를 못 찾으면 엉덩이→발
+    거리, 그것도 없으면 엉덩이 높이로 대신한다.
+    """
     hips = bones.get("hips")
     if hips is None:
         return 0.0
+    for side in ("l", "r"):
+        chain = [bones.get(f"thigh_{side}"), bones.get(f"shin_{side}"), bones.get(f"foot_{side}")]
+        if all(bone is not None for bone in chain):
+            points = [_rest_world(obj, bone).translation for bone in chain]
+            return sum((a - b).length for a, b in zip(points, points[1:]))
     origin = _rest_world(obj, hips).translation
     foot = bones.get("foot_l") or bones.get("foot_r")
     if foot is not None:
@@ -524,6 +544,21 @@ def _pole_prior(rest, rest_frame, root, pose):
     return _rotation(pose[root]) @ local
 
 
+def _transport_mid(origin, mid, fk_end, end):
+    """끝점이 FK 자리에서 옮겨졌을 때(발 고정) 무릎을 같은 스윙으로 함께 돌린다.
+
+    FK 무릎을 그대로 두고 새 축에 투영하면, 축이 몇 도만 돌아도 무릎의 축 방향 성분이
+    옆 성분으로 새어 들어와 폴 평면이 크게 돈다. 실측(CMU 94_16, 발이 8cm 옮겨진 스탠스)에서
+    허벅지가 48° 비틀렸다. 뿌리→FK 끝점을 뿌리→새 끝점으로 보내는 최소 회전으로 무릎을
+    옮기면 축에 대한 무릎 방향이 FK와 같게 유지된다.
+    """
+    before = fk_end - origin
+    after = end - origin
+    if before.length < 1e-6 or after.length < 1e-6 or (before - after).length < 1e-9:
+        return mid
+    return origin + before.rotation_difference(after) @ (mid - origin)
+
+
 def _pole_position(rest_frame, rest_offset, root, mid, end, fallback, prior=None):
     """레스트에서 폴이 삼각형에 대해 갖던 관계를 현재 삼각형으로 옮긴다.
 
@@ -575,8 +610,13 @@ def _leading_calibration(context, source, pairs, frames, limit=3):
     return dropped
 
 
-def _sample(context, source, target, pairs, frames, corrections, translation_scale, ground=True, smooth=0, facing=None):
-    """프레임별로 캐릭터 본의 로컬 회전과 엉덩이 이동을 계산한다."""
+def _sample(context, source, target, pairs, frames, corrections, translation_scale, ground=True, smooth=0, facing=None,
+            anchor_bones=(), anchor_scale=0.0, target_height=0.0):
+    """프레임별로 캐릭터 본의 로컬 회전과 엉덩이 이동을 계산한다.
+
+    anchor_bones는 원본 발이 멈춘 구간에서 IK 목표를 고정할 캐릭터 발 본이다. 돌려주는
+    anchors는 본별로 프레임마다의 발목 목표 위치(아마추어 공간)다. _anchor_ends 참조.
+    """
     scene = context.scene
     order = _hierarchy(target)
     rest = {bone.name: bone.matrix_local for bone in target.data.bones}
@@ -594,6 +634,10 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
     target_rotation = _rotation(target_basis).inverted()
     hips_rest_world = _rest_world(target, target.data.bones[hips]).translation if hips else None
     rest_floor = _lowest_rest(target, target_basis, ground_bones) if ground and ground_bones else 0.0
+    # 앵커 발의 원본 위치를 캐릭터 척도·아마추어 방향으로 모아 둔다. 절대 위치는 쓰지 않고
+    # 프레임 사이의 차이만 쓴다(_anchor_ends).
+    anchor_source = {name: mapped[name] for name in anchor_bones if name in mapped}
+    source_pos = {name: [] for name in anchor_source}
     # 모션의 루트 이동은 첫 프레임을 기준으로 재는다. 리그마다 레스트 높이가 다르므로
     # 레스트를 기준으로 삼으면 캐릭터가 공중에 뜨거나 바닥을 파고든다.
     origin = None
@@ -603,6 +647,9 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
         depsgraph = context.evaluated_depsgraph_get()
         source_eval = source.evaluated_get(depsgraph)
         source_world = source_eval.matrix_world
+        for name, foot in anchor_source.items():
+            foot_world = (source_world @ source_eval.pose.bones[foot].matrix).translation
+            source_pos[name].append(target_rotation @ (facing @ (foot_world * anchor_scale)))
         pose = {}
         for bone in order:
             inverse = parent_rest[bone.name]
@@ -637,18 +684,51 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
             rotations[name] = _smooth_series(series, smooth, _blend_quaternions)
         hips_targets = _smooth_series(hips_targets, smooth, _blend_vectors)
     # 3단계: 완화한 값으로 순운동학을 다시 풀어 발 관통량을 잰다. 1단계 포즈로 재면
-    # 완화가 되돌려 놓은 발 높이를 놓친다.
-    if ground and ground_bones:
-        for index in range(len(frames)):
-            offset = rest[hips].inverted() @ (target_inverse @ hips_targets[index]) if hips and hips_targets else None
-            pose = _replay(order, rest, parent_rest, rotations, index, hips, offset)
+    # 완화가 되돌려 놓은 발 높이를 놓친다. 앵커 발은 IK가 실제로 놓을 자리로 잰다.
+    def replay_all():
+        return [_replay(order, rest, parent_rest, rotations, index, hips,
+                        rest[hips].inverted() @ (target_inverse @ hips_targets[index]) if hips and hips_targets else None)
+                for index in range(len(frames))]
+
+    def lowest_point(pose):
+        return min(
+            (target_basis @ pose[name] @ offset).z
+            for name in ground_bones
+            for offset in (Vector((0.0, 0.0, 0.0)), Vector((0.0, target.data.bones[name].length, 0.0)))
+        )
+
+    replays = replay_all()
+    # 바닥 맞춤: 엉덩이 본 원점이 다리에 대해 어디 놓이는지는 리그마다 다르다(골반 위,
+    # 다리 사이 등). 원본과 다르면 원본에서 땅을 딛던 발이 통째로 떠 있거나 파고든다.
+    # 실측(ACCAD Walk1)에서 발이 10~15cm 아래로 들어가 프레임별 보정이 엉덩이를 22cm까지
+    # 들었다 내렸다 했다. 프레임별 최저점의 하위 10% 지점이 바닥에 오도록 상수만큼 먼저
+    # 옮기고, 프레임별 보정은 남은 관통에만 쓴다. 중앙값으로 맞추면 절반의 프레임이 몇 mm씩
+    # 파고들어 그 보정이 매 프레임 튄다.
+    base = 0.0
+    if ground and ground_bones and hips and hips_targets:
+        lows = sorted(lowest_point(pose) for pose in replays)
+        base = rest_floor - lows[len(lows) // 10]
+        if abs(base) > 1e-6:
+            hips_targets = [world_target + Vector((0.0, 0.0, base)) for world_target in hips_targets]
+            replays = replay_all()
+    # 관통은 IK가 실제로 발을 놓을 자리(앵커)로 잰다. 최종 앵커는 아래에서 들어 올린 자세로
+    # 다시 구한다: 스탠스 동안 발은 바닥에 붙어 있어야 하므로 스윙 발 때문에 생긴 프레임별
+    # 보정에 같이 오르내리면 안 된다.
+    anchors, _planted = _anchor_ends(replays, source_pos, frames, target_height) if source_pos else ({}, {})
+    # 앵커 발(과 그 아래 발끝)은 엉덩이를 들어 바닥을 피하지 않고 발 목표 자체를 바닥 위로
+    # 올린다(아래 클램프). 엉덩이를 들면 땅을 딛은 반대쪽 다리가 목표에 닿지 못해 발이
+    # 엉덩이를 따라 오르내린다. 실측(ACCAD Walk1)에서 스윙 발끝 때문에 엉덩이가 7.5cm까지
+    # 들리며 스탠스 발이 2~6cm 오르내렸다.
+    free_ground = [name for name in ground_bones if _anchor_owner(target, name, anchors) is None]
+    if ground and free_ground:
+        for pose in replays:
             floor = min(
                 (target_basis @ pose[name] @ offset).z
-                for name in ground_bones
+                for name in free_ground
                 for offset in (Vector((0.0, 0.0, 0.0)), Vector((0.0, target.data.bones[name].length, 0.0)))
             )
             penetration.append(max(0.0, rest_floor - floor))
-    lift = _dilate(penetration) if ground and ground_bones else []
+    lift = _dilate(penetration) if ground and free_ground else []
     for index, world_target in enumerate(hips_targets):
         raised = world_target.copy()
         if index < len(lift):
@@ -659,7 +739,151 @@ def _sample(context, source, target, pairs, frames, corrections, translation_sca
     final = [_replay(order, rest, parent_rest, rotations, index, hips,
                      locations[index] if hips and index < len(locations) else None)
              for index in range(len(frames))]
-    return rotations, locations, hips, (max(lift) if lift else 0.0), sum(1 for value in penetration if value > 1e-6), final
+    anchors, planted = _anchor_ends(final, source_pos, frames, target_height) if source_pos else ({}, {})
+    if ground and anchors:
+        _clamp_anchors(target, final, anchors, planted, ground_bones, target_basis, rest_floor)
+    return rotations, locations, hips, (max(lift) if lift else 0.0), sum(1 for value in penetration if value > 1e-6), final, anchors, base
+
+
+def _stance_segments(positions, frames, height):
+    """원본 발이 멈춰 있는 구간 [(시작, 끝) ...). 끝은 포함하지 않는다."""
+    limit = height * STANCE_SPEED_RATIO
+    planted = [False] * len(positions)
+    for index in range(1, len(positions)):
+        gap = max(1, frames[index] - frames[index - 1])
+        planted[index] = (positions[index] - positions[index - 1]).length / gap < limit
+    if len(planted) > 1:
+        planted[0] = planted[1]
+    segments = []
+    index = 0
+    while index < len(planted):
+        if not planted[index]:
+            index += 1
+            continue
+        low = index
+        while index < len(planted) and planted[index]:
+            index += 1
+        if index - low >= STANCE_MIN_FRAMES:
+            # 한두 프레임 노이즈로 끊긴 스탠스는 하나로 잇는다. 따로 두면 구간마다 FK 평균이
+            # 달라 그 사이에서 발이 자리를 옮긴다.
+            if segments and low - segments[-1][1] <= STANCE_BLEND_FRAMES:
+                segments[-1] = (segments[-1][0], index)
+            else:
+                segments.append((low, index))
+    return segments
+
+
+def _anchor_ends(replays, source_pos, frames, height):
+    """원본 발이 땅을 딛고 있는 동안 IK 발목 목표를 붙잡아 둔다.
+
+    본 방향만 옮기는 FK는 캐릭터의 다리 기하(골반 폭, 다리 마디 길이, 엉덩이 원점과
+    고관절의 관계)가 원본과 다르면, 원본에서 땅을 딛고 가만히 있던 발도 몸이 흔들리는
+    만큼 미끄러진다. 실측(CMU 80_45 서 있는 자세)에서 원본 발은 0.3~0.7cm 안에 머물렀는데
+    FK 발은 1.2~3.3cm를 움직였다.
+
+    원본 발이 멈춘 구간(스탠스)마다 FK 발 위치의 구간 평균에 원본 발의 미세한 움직임만
+    얹어 목표로 삼는다. 발이 서는 자리는 FK가 정하고, 흔들림은 원본만큼만 남는다. 스윙
+    구간은 FK를 그대로 따르고, 스탠스 앞뒤 STANCE_BLEND_FRAMES 동안 두 값을 선형으로
+    잇는다. 클립 전체에서 FK와 원본의 차이를 상수로 보고 빼는 방식은 걷기에서 스윙 위상마다
+    차이가 달라 다리 방향이 20~36° 벗어났으므로 쓰지 않는다.
+    """
+    anchors = {}
+    planted = {}
+    zero = Vector((0.0, 0.0, 0.0))
+    for name, source in source_pos.items():
+        if len(source) != len(replays):
+            continue
+        fk = [pose[name].to_translation() for pose in replays]
+        count = len(fk)
+        delta = [zero.copy() for _index in range(count)]
+        segments = _stance_segments(source, frames, height)
+        planted[name] = [any(low <= index < high for low, high in segments) for index in range(count)]
+        for low, high in segments:
+            fk_mean = sum(fk[low:high], zero.copy()) / (high - low)
+            source_mean = sum(source[low:high], zero.copy()) / (high - low)
+            for index in range(low, high):
+                delta[index] = fk_mean + (source[index] - source_mean) - fk[index]
+        # 스탠스 사이·앞뒤의 스윙 구간을 잇는다. 짧은 틈은 양쪽 끝값을 선형으로 잇고,
+        # 긴 틈은 STANCE_BLEND_FRAMES 동안 0으로 줄였다가 다시 키운다.
+        edges = [(-1, None)] + [(low, high) for low, high in segments] + [(count, None)]
+        for (_low, previous_high), (next_low, _high) in zip(edges, edges[1:]):
+            gap_start = previous_high if previous_high is not None else 0
+            gap_end = next_low
+            if gap_end <= gap_start:
+                continue
+            before = delta[gap_start - 1] if previous_high is not None else None
+            after = delta[gap_end] if gap_end < count else None
+            span = gap_end - gap_start
+            for index in range(gap_start, gap_end):
+                if before is not None and after is not None and span <= 2 * STANCE_BLEND_FRAMES:
+                    weight = (index - gap_start + 1) / (span + 1)
+                    delta[index] = before * (1.0 - weight) + after * weight
+                    continue
+                value = zero.copy()
+                if before is not None:
+                    fade = 1.0 - (index - gap_start + 1) / (STANCE_BLEND_FRAMES + 1)
+                    if fade > 0.0:
+                        value = value + before * fade
+                if after is not None:
+                    rise = 1.0 - (gap_end - index) / (STANCE_BLEND_FRAMES + 1)
+                    if rise > 0.0:
+                        value = value + after * rise
+                delta[index] = value
+        anchors[name] = [position + shift for position, shift in zip(fk, delta)]
+    return anchors, planted
+
+
+def _anchor_owner(target, name, anchors):
+    """본이 앵커 발 자신이거나 그 자손이면 그 앵커 발 이름, 아니면 None."""
+    bone = target.data.bones[name]
+    while bone is not None:
+        if bone.name in anchors:
+            return bone.name
+        bone = bone.parent
+    return None
+
+
+def _clamp_anchors(target, poses, anchors, planted, ground_bones, target_basis, rest_floor):
+    """스윙 중인 앵커 발의 발·발끝이 바닥 아래로 내려가면 그 프레임의 발목 목표를 그만큼 올린다.
+
+    발끝 위치는 FK 자세의 발 방향(끝본 보정이 그대로 맞추는 방향)에 앵커 이동량을 더해 잰다.
+    땅을 딛은(스탠스) 프레임은 건너뛴다. 거의 펴진 다리의 발목을 몇 mm만 올려도 무릎이
+    10° 넘게 튀어나오기 때문이다(다리 0.52에서 3mm면 약 12°). 스탠스에서 남는 관통은
+    바닥 맞춤이 하위 10% 지점을 쓰므로 몇 mm 수준이다.
+    """
+    inverse = target_basis.inverted()
+    owned = {name: [bone for bone in ground_bones if _anchor_owner(target, bone, anchors) == name] for name in anchors}
+    for name, ends in anchors.items():
+        flags = planted.get(name, [])
+        for index, pose in enumerate(poses):
+            if index < len(flags) and flags[index]:
+                continue
+            delta = ends[index] - pose[name].to_translation()
+            lowest = min(
+                (target_basis @ (pose[bone] @ offset + delta)).z
+                for bone in owned[name]
+                for offset in (Vector((0.0, 0.0, 0.0)), Vector((0.0, target.data.bones[bone].length, 0.0)))
+            )
+            deficit = rest_floor - lowest
+            if deficit > 1e-6:
+                ends[index] = inverse @ (target_basis @ ends[index] + Vector((0.0, 0.0, deficit)))
+
+
+def _anchor_targets(target, setups, foot_bones):
+    """IK 체인이 끝나는 발 본. use_tail 체인은 끝본 꼬리에 머리가 붙은 발 자식이다."""
+    anchored = {}
+    for setup in setups:
+        tip = setup["tip"]
+        if not setup["use_tail"]:
+            if tip in foot_bones:
+                anchored[setup["control"]] = tip
+            continue
+        tail = target.data.bones[tip].tail_local
+        for child in target.data.bones[tip].children:
+            if child.name in foot_bones and (child.head_local - tail).length < 1e-4:
+                anchored[setup["control"]] = child.name
+                break
+    return anchored
 
 
 def _replay(order, rest, parent_rest, rotations, index, hips=None, hips_offset=None):
@@ -882,7 +1106,7 @@ def _baked_poses(context, target, frames):
     return captured
 
 
-def _ik_channels(target, setups, poses, residuals=None, live=None):
+def _ik_channels(target, setups, poses, residuals=None, live=None, anchors=None, anchored=None):
     """프레임별 최종 포즈에서 IK 컨트롤과 폴 본의 로컬 이동값을 만든다.
 
     residuals는 컨스트레인트별 폴 각도 보정값(라디안)이다. 리그의 레스트 자세가 그
@@ -895,11 +1119,14 @@ def _ik_channels(target, setups, poses, residuals=None, live=None):
     달라져도 무릎 각이 크게 돌아 다리가 튄다. 그래서 목표를 실제 뿌리에 맞춰 옮겨
     삼각형을 그대로 유지한다. 발은 뿌리가 벗어난 만큼(엉덩이 이동 오차 이하) 같이
     움직이지만, 그 값은 부드럽게 변하므로 튀지 않는다.
+
+    anchors/anchored가 있으면 그 체인의 끝점은 FK 발 대신 앵커 위치(_anchor_ends)로 잡는다.
     """
     rest = {bone.name: bone.matrix_local for bone in target.data.bones}
     tracks = []
     for setup in setups:
         tip, root, control, pole = setup["tip"], setup["root"], setup["control"], setup["pole"]
+        anchor = (anchors or {}).get((anchored or {}).get(control))
         length = target.data.bones[tip].length
         offset = Vector((0.0, length, 0.0)) if setup["use_tail"] else Vector((0.0, 0.0, 0.0))
         rest_root = rest[root].to_translation()
@@ -913,13 +1140,15 @@ def _ik_channels(target, setups, poses, residuals=None, live=None):
         if rest_frame is not None and pole:
             rest_offset = rest_frame.transposed() @ (rest[pole].to_translation() - rest_root)
             pole_radius = Vector((0.0, rest_offset.y, rest_offset.z)).length
-        control_track, pole_track = [], []
+        control_track, pole_track, ends = [], [], []
         for index, pose in enumerate(poses):
             actual = live[index] if live else None
             # 표본에서의 다리 뿌리와 실제로 구워진 뿌리의 차이만큼 삼각형을 통째로 옮긴다.
             shift = (actual[root].to_translation() - pose[root].to_translation()
                      if actual else Vector((0.0, 0.0, 0.0)))
-            end = (pose[tip] @ offset) + shift
+            fk_end = (pose[tip] @ offset) + shift
+            end = (anchor[index] + shift) if anchor else fk_end
+            ends.append(end)
             control_base = actual[control] if actual else pose[control]
             control_local = control_base.inverted() @ end
             control_track.append(control_local)
@@ -933,8 +1162,8 @@ def _ik_channels(target, setups, poses, residuals=None, live=None):
             else:
                 pole_base = actual[pole] if actual else pose[pole]
             origin = pose[root].to_translation() + shift
-            wanted = _pole_position(rest_frame, rest_offset, origin,
-                                    pose[tip].to_translation() + shift, end,
+            mid = _transport_mid(origin, pose[tip].to_translation() + shift, fk_end, end)
+            wanted = _pole_position(rest_frame, rest_offset, origin, mid, end,
                                     pole_base.to_translation(),
                                     _pole_prior(rest, rest_frame, root, pose))
             angle = (residuals or {}).get(setup["control"], 0.0)
@@ -944,7 +1173,7 @@ def _ik_channels(target, setups, poses, residuals=None, live=None):
                     wanted = origin + Matrix.Rotation(angle, 3, axis.normalized()) @ (wanted - origin)
             pole_track.append(pole_base.inverted() @ wanted)
         tracks.append({"setup": setup, "control": control_track, "pole": pole_track,
-                       "pole_radius": pole_radius})
+                       "pole_radius": pole_radius, "ends": ends, "anchored": anchor is not None})
     return tracks
 
 
@@ -975,6 +1204,18 @@ def _write_curves(target, action, frames, rotations, locations, hips, simplify=0
         shift_error = error
     written += _write_influence(bag, target, frames, ())[0]
     return written, angle_error, shift_error, bag
+
+
+def _shift_keys(bag, shift):
+    """채널백의 모든 키와 핸들을 프레임 축으로 shift만큼 옮긴다."""
+    for curve in bag.fcurves:
+        points = curve.keyframe_points
+        for attribute in ("co", "handle_left", "handle_right"):
+            values = [0.0] * (len(points) * 2)
+            points.foreach_get(attribute, values)
+            values[0::2] = [value + shift for value in values[0::2]]
+            points.foreach_set(attribute, values)
+        curve.update()
 
 
 def _write_influence(bag, target, frames, ik_tracks):
@@ -1043,7 +1284,7 @@ def _fill(bag, path, index, group, frames, values):
     return curve
 
 
-def _pole_residuals(context, target, setups, poses, frames, probes=5):
+def _pole_residuals(context, target, tracks, poses, frames, probes=5):
     """구운 결과에서 무릎이 원하는 자리에서 얼마나 돌아갔는지 잰다.
 
     폴 각도 규약은 리그마다 다르고 컨스트레인트의 pole_angle과도 별개로 레스트 자세가
@@ -1054,22 +1295,25 @@ def _pole_residuals(context, target, setups, poses, frames, probes=5):
     rest = {bone.name: bone.matrix_local for bone in target.data.bones}
     span = len(frames)
     picked = sorted({max(0, min(span - 1, span * (index + 1) // (probes + 1))) for index in range(probes)})
-    gathered = {setup["control"]: [] for setup in setups if setup["pole"]}
+    gathered = {track["setup"]["control"]: [] for track in tracks if track["setup"]["pole"]}
     for index in picked:
         scene.frame_set(frames[index])
         context.view_layer.update()
         pose = poses[index]
-        for setup in setups:
+        for track in tracks:
+            setup = track["setup"]
             if not setup["pole"]:
                 continue
             tip, root = setup["tip"], setup["root"]
             offset = Vector((0.0, target.data.bones[tip].length, 0.0)) if setup["use_tail"] else Vector((0.0, 0.0, 0.0))
             origin = target.pose.bones[root].matrix.to_translation()
-            axis = (pose[tip] @ offset) - origin
+            # 발 고정으로 끝점이 옮겨졌으면 축과 무릎도 그 자리 기준으로 잰다.
+            end = track["ends"][index]
+            axis = end - origin
             if axis.length < 1e-6:
                 continue
             axis.normalize()
-            wanted = pose[tip].to_translation() - origin
+            wanted = _transport_mid(origin, pose[tip].to_translation(), pose[tip] @ offset, end) - origin
             solved = target.pose.bones[tip].matrix.to_translation() - origin
             wanted = wanted - axis * wanted.dot(axis)
             solved = solved - axis * solved.dot(axis)
@@ -1112,7 +1356,7 @@ def _rewrite_poles(bag, target, frames, tracks, simplify, scale):
     return written
 
 
-def _bake_followers(context, target, bag, frames, deferred, poses, simplify, setups):
+def _bake_followers(context, target, bag, frames, deferred, poses, simplify, tracks):
     """IK가 정한 부모 방향 위에서 끝본의 세계 방향을 FK 결과와 같게 맞춘다.
 
     2본 IK는 팔뚝·정강이의 비틀림을 폴이 정하므로 FK와 다를 수 있다. 그대로 두면 손과
@@ -1136,12 +1380,15 @@ def _bake_followers(context, target, bag, frames, deferred, poses, simplify, set
             if previous:
                 quaternion.make_compatible(previous[-1])
             previous.append(quaternion)
-        for setup in setups:
+        for track in tracks:
+            setup = track["setup"]
             tip = setup["tip"]
             offset = Vector((0.0, target.data.bones[tip].length, 0.0)) if setup["use_tail"] else Vector((0.0, 0.0, 0.0))
             solved = target.pose.bones[tip].matrix
-            effector = max(effector, ((solved @ offset) - (pose[tip] @ offset)).length)
-            middle = max(middle, (solved.to_translation() - pose[tip].to_translation()).length)
+            effector = max(effector, ((solved @ offset) - track["ends"][index]).length)
+            # 앵커 체인은 끝점이 FK와 다르므로 무릎도 FK에서 벗어나는 것이 맞다.
+            if not track["anchored"]:
+                middle = max(middle, (solved.to_translation() - pose[tip].to_translation()).length)
     written = 0
     worst = 0.0
     for name, values in series.items():
@@ -1153,15 +1400,19 @@ def _bake_followers(context, target, bag, frames, deferred, poses, simplify, set
     return written, worst, effector, middle
 
 
-def deepest_penetration(context, target, frames, floor):
-    """검증 프레임에서 바닥보다 아래로 내려간 가장 깊은 본과 깊이."""
+def deepest_penetration(context, target, frames, floor, bones=None):
+    """검증 프레임에서 바닥보다 아래로 내려간 가장 깊은 본과 깊이. bones로 대상을 좁힌다."""
     scene = context.scene
+    bones = set(bones) if bones is not None else {bone.name for bone in target.pose.bones}
     worst = (0.0, "")
     for frame in frames:
         scene.frame_set(frame)
         context.view_layer.update()
         basis = target.matrix_world
         for bone in target.pose.bones:
+            # 바닥에 닿아야 하는 발·발끝만 본다. 손이나 IK 컨트롤·폴, 소켓이 바닥 아래여도 관통이 아니다.
+            if bone.name not in bones:
+                continue
             matrix = basis @ bone.matrix
             for point in (matrix.translation, matrix @ Vector((0.0, bone.bone.length, 0.0))):
                 depth = floor - point.z
@@ -1170,15 +1421,17 @@ def deepest_penetration(context, target, frames, floor):
     return worst
 
 
-def verify(context, source, target, pairs, frames, facing=None):
+def verify(context, source, target, pairs, frames, facing=None, exclude=()):
     """구운 결과에서 두 리그의 본 방향 차이를 도 단위 최대값으로 돌려준다.
 
     모션 본의 방향이 지어낸 값이면 그 방향에 맞추지 않으므로 오차로도 세지 않는다.
     그대로 세면 손처럼 방향을 알 수 없는 본 때문에 100°가 넘는 값이 찍혀, 정작 봐야 할
-    다른 본의 오차가 묻힌다.
+    다른 본의 오차가 묻힌다. exclude(캐릭터 본 이름)도 뺀다 — 발 고정으로 발을 FK와 다른
+    자리에 붙잡은 다리는 방향이 원본과 다른 것이 의도다.
     """
     facing = Quaternion() if facing is None else facing
-    pairs = [item for item in pairs if not _invented_direction(source, source.data.bones[item[1]])]
+    pairs = [item for item in pairs
+             if not _invented_direction(source, source.data.bones[item[1]]) and item[2] not in exclude]
     scene = context.scene
     worst = 0.0
     for frame in frames:
@@ -1195,8 +1448,13 @@ def verify(context, source, target, pairs, frames, facing=None):
 
 def apply_motion(context, source, target, *, step=1, use_location=True, ground=True,
                  simplify=DEFAULT_SIMPLIFY, smooth=DEFAULT_SMOOTH, use_ik=False, align_facing=True,
-                 name="CatAni 모션"):
-    """모션 리그의 동작을 캐릭터에 굽고 적용 결과 보고서를 돌려준다."""
+                 anchor_feet=True, name="CatAni 모션"):
+    """모션 리그의 동작을 캐릭터에 굽고 적용 결과 보고서를 돌려준다.
+
+    anchor_feet가 켜져 있으면 발로 끝나는 IK 체인의 목표를 원본 발이 멈춘 구간에서 고정한다
+    (_anchor_ends). 구운 키는 걷어낸 선두 보정 프레임만큼 앞으로 옮겨 원본 첫 프레임에서
+    시작한다.
+    """
     for obj in (source, target):
         if obj is None or obj.type != "ARMATURE":
             raise ValueError("모션 리그와 캐릭터 아마추어가 모두 필요합니다.")
@@ -1251,10 +1509,15 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
                 muted.append(track)
         _clear_pose(target, {target_bone for _slot, _source, target_bone in pairs})
         target.data.pose_position = "POSE"
-        rotations, locations, hips, lift, lifted_frames, poses = _sample(
-            context, source, target, pairs, frames, corrections, translation_scale,
-            ground=use_location and ground, smooth=smooth, facing=facing)
         setups = ik_setups(target) if use_ik else []
+        foot_targets = {target_bone for slot, _source, target_bone in pairs if slot.startswith("foot")}
+        anchored = _anchor_targets(target, setups, foot_targets) if anchor_feet else {}
+        anchor_scale = target_height / source_height if source_height > 1e-5 and target_height > 1e-5 else 0.0
+        rotations, locations, hips, lift, lifted_frames, poses, anchors, ground_base = _sample(
+            context, source, target, pairs, frames, corrections, translation_scale,
+            ground=use_location and ground, smooth=smooth, facing=facing,
+            anchor_bones=set(anchored.values()), anchor_scale=anchor_scale, target_height=target_height)
+        anchored = {control: bone for control, bone in anchored.items() if bone in anchors}
         # IK가 회전을 직접 풀어 주는 체인 본에는 FK 키를 쓰지 않는다.
         chain = {bone for setup in setups for bone in setup["chain"]}
         for bone in chain & set(rotations):
@@ -1280,17 +1543,17 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
         if setups:
             # 2단계: 구워진 FK 자세 위에서 IK 목표를 잡고 곡선을 쓴다.
             live = _baked_poses(context, target, frames)
-            tracks = _ik_channels(target, setups, poses, live=live)
+            tracks = _ik_channels(target, setups, poses, live=live, anchors=anchors, anchored=anchored)
             count, disabled, ik_shift = _write_ik_curves(bag, target, frames, tracks, simplify, target_height)
             written += count
             curve_shift = max(curve_shift, ik_shift)
             # 폴 각도의 상수 잔차를 실측해 되돌린 뒤 폴 곡선만 다시 쓴다.
-            pole_fix = _pole_residuals(context, target, setups, poses, frames)
+            pole_fix = _pole_residuals(context, target, tracks, poses, frames)
             if any(abs(value) > math.radians(0.05) for value in pole_fix.values()):
-                tracks = _ik_channels(target, setups, poses, pole_fix, live=live)
+                tracks = _ik_channels(target, setups, poses, pole_fix, live=live, anchors=anchors, anchored=anchored)
                 written += _rewrite_poles(bag, target, frames, tracks, simplify, target_height)
             count, error, ik_effector, ik_middle = _bake_followers(
-                context, target, bag, frames, deferred, poses, simplify, setups)
+                context, target, bag, frames, deferred, poses, simplify, tracks)
             written += count
             curve_error = max(curve_error, error)
         action["catani_motion_source"] = source.name
@@ -1305,28 +1568,36 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
         divisions = 12 if simplify > 0.0 else 6
         samples = sorted({frames[0], frames[-1],
                           *(frames[0] + round(span * index / divisions) for index in range(1, divisions))})
-        error = verify(context, source, target, pairs, samples, facing=facing)
+        anchored_chain = sorted({bone for setup in setups if setup["control"] in anchored for bone in setup["chain"]})
+        error = verify(context, source, target, pairs, samples, facing=facing, exclude=anchored_chain)
         invented = [target_bone for _slot, source_bone, target_bone in pairs
                     if _invented_direction(source, source.data.bones[source_bone])]
         floor_bones = [target_bone for slot, _source, target_bone in pairs if slot.startswith(("foot", "toe"))]
         rest_floor = _lowest_rest(target, target.matrix_world.copy(), floor_bones) if floor_bones else 0.0
-        depth, deep_bone = deepest_penetration(context, target, samples, rest_floor)
-        scene.frame_set(frames[0])
+        depth, deep_bone = deepest_penetration(context, target, samples, rest_floor, floor_bones)
+        # 선두 보정 프레임을 걷어낸 만큼 키를 앞으로 옮겨 원본 첫 프레임에서 시작하게 한다.
+        # 검증은 원본과 같은 프레임에서 재야 하므로 그 뒤에 옮긴다.
+        shift = start - frames[0]
+        if shift:
+            _shift_keys(bag, shift)
+        first, last = frames[0] + shift, frames[-1] + shift
+        scene.frame_start, scene.frame_end = first, last
+        scene.frame_set(first)
         succeeded = True
         return {
             "pairs": pairs, "skipped": skipped, "guessed": guessed, "keyframes": written,
             "coverage": len(pairs) / len(SLOT_ORDER),
-            "frame_start": frames[0], "frame_end": frames[-1], "frame_count": len(frames), "step": step,
+            "frame_start": first, "frame_end": last, "frame_count": len(frames), "step": step,
             "source_profile": profile_label(source_key), "target_profile": profile_label(target_key),
             "target_bone_total": len(target.data.bones), "translation_scale": translation_scale,
             "simplify": simplify, "dense_keyframes": dense, "smooth": smooth, "dropped_frames": dropped,
             "align_facing": align_facing, "facing_angle": math.degrees(facing_angle),
             "ik": [setup["control"] for setup in setups], "ik_requested": use_ik,
-            "ik_effector": ik_effector, "ik_middle": ik_middle,
+            "ik_effector": ik_effector, "ik_middle": ik_middle, "anchored": sorted(anchored.values()),
             "pole_fix": {name: math.degrees(value) for name, value in pole_fix.items()},
             "curve_error": curve_error, "curve_shift": curve_shift, "invented_bones": invented,
-            "max_direction_error": error, "verified_frames": samples,
-            "ground_lift": lift, "ground_frames": lifted_frames,
+            "max_direction_error": error, "verified_frames": samples, "anchored_chain": anchored_chain,
+            "ground_lift": lift, "ground_frames": lifted_frames, "ground_base": ground_base,
             "penetration": depth, "penetration_bone": deep_bone,
             "previous_action": previous.name if previous else "",
             "muted_tracks": [track.name for track in muted],
@@ -1383,6 +1654,11 @@ def format_report(asset, report):
         )
     else:
         lines.append("곡선 간소화: 없음 · 모든 프레임에 베지어 키")
+    if report.get("anchored"):
+        lines.append(f"발 고정: {', '.join(report['anchored'])} (원본 발이 멈춘 구간에서 IK 목표를 붙잡음 · "
+                     f"{', '.join(report.get('anchored_chain', []))}은 방향 검증에서 제외)")
+    if abs(report.get("ground_base", 0.0)) > 1e-6:
+        lines.append(f"바닥 맞춤: 엉덩이 {report['ground_base']:+.3f}")
     if report["ground_lift"] > 1e-6:
         lines.append(f"발 바닥 관통 보정: 최대 {report['ground_lift']:.3f} · {report['ground_frames']}프레임")
     if report["penetration"] > 0.02:
