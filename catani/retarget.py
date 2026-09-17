@@ -18,10 +18,15 @@ DEFAULT_SIMPLIFY = 1.0
 # 노이즈 완화 기본 창 크기(프레임). 0이나 1이면 완화하지 않는다.
 # 실측에서 완화는 손익이 나빴다. 같은 키 수를 허용 오차로 얻는 편이 오차가 더 작다.
 DEFAULT_SMOOTH = 0
-# 폴 평면을 다시 세울지 가르는 굽힘 정도. `side/arm`은 관절이 굽은 각의 사인에
-# 해당하므로 0.02는 약 1.1°다. 실측에서 걷기 중 다리는 0.10 위였고, 완전히
-# 펴지는 순간에만 0으로 떨어졌다.
-MIN_PLANE_RATIO = 0.02
+# 실측 무릎 방향이 루트 본(허벅지·위팔)의 비틀림에서 예측한 쪽으로 최소 이만큼은 굽어
+# 있어야 한다고 보는 문턱. 루트 본 길이에 대한 비율이며 `side/arm`이 관절이 굽은 각의
+# 사인이므로 0.05는 약 2.9°다. 예측 방향 성분이 이에 못 미치면 부족한 만큼 예측 방향을
+# 더해, 실측 방향(표본 노이즈·과신전에 좌우됨)이 예측과 반대여도 뒤집히지 않게 한다.
+# 뒤집힘 방지는 문턱 크기와 무관하고, 문턱은 펴진 관절에서 노이즈가 폴을 흔드는 정도와
+# 살짝 굽은 관절에서 FK 무릎 방향을 얼마나 그대로 따르는지 사이의 절충이다. 실측에서
+# 크라잉(CMU 80_45)의 펴진 다리는 0.03에서 약 4° 과신전으로 들어왔고, 걷기 중 다리는
+# 0.10 위였다. 합성 걷기에서 0.05는 간소화 없는 IK의 방향 오차를 1.2°에 묶었다(0.1은 2.4°).
+POLE_PRIOR_RATIO = 0.05
 # IK 목표 곡선을 회전 곡선보다 몇 배 조일지. 다리가 거의 펴진 구간에서는 목표를 조금만
 # 옮겨도 무릎 각이 크게 돌아 다리가 튄다. 실측에서 4배면 2°를 넘는 튐이 사라졌고, 더
 # 조여도 이득은 거의 없이 키만 늘었다(01_13에서 16배는 키 +42%에 0.6° 개선).
@@ -473,12 +478,19 @@ def ik_setups(target):
     return setups
 
 
-def _plane_basis(root, mid, end, hint=None):
+def _plane_basis(root, mid, end, prior=None):
     """삼각형(루트·중간관절·끝점)에 붙은 정규 직교 좌표계. 없으면 None.
 
-    무릎·팔꿈치가 거의 펴지면 평면을 정하는 `side`가 0으로 수렴해 방향이 표본 노이즈에
-    좌우된다. 그대로 쓰면 폴이 축 둘레로 홱 돌아 다리가 한 프레임씩 튄다. `hint`(직전에
-    안정적이던 평면 방향)를 주면 그 구간에서 평면을 이어 쓴다.
+    Blender의 폴 타깃은 무릎 위치가 아니라 루트 본(허벅지)의 X축이 폴을 향하도록 체인을
+    돌린다. 무릎이 어느 쪽으로 굽는지는 솔버가 레스트 굽힘 방향으로 정한다. 그래서 무릎이
+    거의 펴진 구간에서 실측 무릎 방향만으로 폴을 놓으면, 무릎이 조금만 뒤로 꺾여(과신전)
+    있어도 솔버가 허벅지를 180° 돌려 무릎을 그 자리에 맞춘다 — 다리 전체가 뒤집힌다.
+
+    `prior`는 FK 루트 본의 비틀림에서 예측한 무릎 방향이다. 실측 `side`의 예측 방향 성분이
+    루트 본 길이의 POLE_PRIOR_RATIO에 못 미치면 부족한 만큼 예측 방향을 더한다. 관절이
+    펴질수록(또는 반대로 꺾일수록) 예측이 우세해 비틀림이 FK와 같아지고, 예측 쪽으로 충분히
+    굽어 있으면 실측 무릎 방향이 그대로 남는다. 문턱에서 더하는 양이 0이 되므로 평면이 홱
+    바뀌지 않고, 예측 방향 성분이 항상 문턱 이상이 되므로 반대쪽으로 뒤집히지도 않는다.
     """
     axis = end - root
     if axis.length < 1e-6:
@@ -486,33 +498,44 @@ def _plane_basis(root, mid, end, hint=None):
     axis = axis.normalized()
     arm = mid - root
     side = arm - axis * arm.dot(axis)
-    if hint is not None and arm.length > 1e-9:
-        # 문턱에서 평면이 홱 바뀌면 그 자체가 또 튐이 되므로, 굽힘이 얕아질수록 직전
-        # 평면 쪽으로 서서히 끌어당긴다. 충분히 굽어 있으면 실측값이 그대로 남는다.
-        carried = hint - axis * hint.dot(axis)
-        shortfall = arm.length * MIN_PLANE_RATIO - side.length
-        if carried.length > 1e-6 and shortfall > 0.0:
-            side = side + carried.normalized() * shortfall
+    if prior is not None and arm.length > 1e-9:
+        guess = prior - axis * prior.dot(axis)
+        if guess.length > 1e-6:
+            guess.normalize()
+            shortfall = arm.length * POLE_PRIOR_RATIO - side.dot(guess)
+            if shortfall > 0.0:
+                side = side + guess * shortfall
     if side.length < 1e-6:
         return None
     side = side.normalized()
     return Matrix((axis, side, axis.cross(side))).transposed()
 
 
-def _pole_position(rest_frame, rest_offset, root, mid, end, fallback, hint=None):
+def _pole_prior(rest, rest_frame, root, pose):
+    """FK 루트 본의 비틀림에서 예측한 무릎 방향. 레스트 평면이 없으면 None.
+
+    레스트에서 무릎이 굽는 방향(rest_frame의 side)을 루트 본 로컬로 옮긴 뒤, 그 프레임의
+    FK 루트 본 회전을 곱한다. Blender의 폴은 루트 본 X축을 폴로 향하게 하므로, 이 방향에
+    폴을 놓으면 루트 본의 비틀림이 FK와 같아진다.
+    """
+    if rest_frame is None:
+        return None
+    local = _rotation(rest[root]).inverted() @ Vector(rest_frame.col[1])
+    return _rotation(pose[root]) @ local
+
+
+def _pole_position(rest_frame, rest_offset, root, mid, end, fallback, prior=None):
     """레스트에서 폴이 삼각형에 대해 갖던 관계를 현재 삼각형으로 옮긴다.
 
     이렇게 하면 리그의 pole_angle 규약이 무엇이든 레스트에서 성립하던 IK 해가 그대로
-    재현된다. 규약을 추측하거나 부호를 맞춰 볼 필요가 없다.
-
-    (폴 위치, 다음 프레임에 물려줄 평면 방향)을 돌려준다.
+    재현된다. 규약을 추측하거나 부호를 맞춰 볼 필요가 없다. `prior`는 _plane_basis 참조.
     """
     if rest_frame is None:
-        return fallback, hint
-    current = _plane_basis(root, mid, end, hint)
+        return fallback
+    current = _plane_basis(root, mid, end, prior)
     if current is None:
-        return fallback, hint
-    return root + current @ rest_offset, Vector(current.col[1])
+        return fallback
+    return root + current @ rest_offset
 
 
 def _leading_calibration(context, source, pairs, frames, limit=3):
@@ -891,8 +914,6 @@ def _ik_channels(target, setups, poses, residuals=None, live=None):
             rest_offset = rest_frame.transposed() @ (rest[pole].to_translation() - rest_root)
             pole_radius = Vector((0.0, rest_offset.y, rest_offset.z)).length
         control_track, pole_track = [], []
-        # 관절이 펴진 구간에서 평면을 이어 쓰려면 직전에 안정적이던 방향을 들고 다닌다.
-        plane_hint = Vector(rest_frame.col[1]) if rest_frame is not None else None
         for index, pose in enumerate(poses):
             actual = live[index] if live else None
             # 표본에서의 다리 뿌리와 실제로 구워진 뿌리의 차이만큼 삼각형을 통째로 옮긴다.
@@ -912,9 +933,10 @@ def _ik_channels(target, setups, poses, residuals=None, live=None):
             else:
                 pole_base = actual[pole] if actual else pose[pole]
             origin = pose[root].to_translation() + shift
-            wanted, plane_hint = _pole_position(rest_frame, rest_offset, origin,
-                                                pose[tip].to_translation() + shift, end,
-                                                pole_base.to_translation(), plane_hint)
+            wanted = _pole_position(rest_frame, rest_offset, origin,
+                                    pose[tip].to_translation() + shift, end,
+                                    pole_base.to_translation(),
+                                    _pole_prior(rest, rest_frame, root, pose))
             angle = (residuals or {}).get(setup["control"], 0.0)
             if angle:
                 axis = end - origin
@@ -1029,6 +1051,7 @@ def _pole_residuals(context, target, setups, poses, frames, probes=5):
     구한다. 구간에 흩은 몇 프레임의 중앙값을 쓴다.
     """
     scene = context.scene
+    rest = {bone.name: bone.matrix_local for bone in target.data.bones}
     span = len(frames)
     picked = sorted({max(0, min(span - 1, span * (index + 1) // (probes + 1))) for index in range(probes)})
     gathered = {setup["control"]: [] for setup in setups if setup["pole"]}
@@ -1052,6 +1075,15 @@ def _pole_residuals(context, target, setups, poses, frames, probes=5):
             solved = solved - axis * solved.dot(axis)
             if wanted.length < 1e-5 or solved.length < 1e-5:
                 continue
+            # 폴이 실측 무릎 방향 대신 루트 본 비틀림 예측을 따른 프레임(_plane_basis 참조)은
+            # 무릎이 원래 그 자리에 있을 이유가 없으므로 잔차로 세지 않는다.
+            rest_frame = _plane_basis(rest[root].to_translation(), rest[tip].to_translation(), rest[tip] @ offset)
+            prior = _pole_prior(rest, rest_frame, root, pose)
+            if prior is not None:
+                guess = prior - axis * prior.dot(axis)
+                floor = target.data.bones[root].length * POLE_PRIOR_RATIO
+                if guess.length < 1e-6 or wanted.dot(guess.normalized()) < floor:
+                    continue
             wanted.normalize()
             solved.normalize()
             gathered[setup["control"]].append(
