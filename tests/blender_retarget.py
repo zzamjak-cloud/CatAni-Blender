@@ -173,9 +173,19 @@ simplified_keys = sum(len(curve.keyframe_points) for curve in rotation_curves)
 dense_keys = span * len(rotation_curves)
 assert simplified_keys < dense_keys * 0.25, f"키가 충분히 줄지 않았습니다: {simplified_keys} / {dense_keys}"
 assert all(key.interpolation == "BEZIER" for curve in rotation_curves for key in curve.keyframe_points)
-# 최소제곱으로 접선을 직접 맞추므로 자동 핸들이 아니라 자유 핸들을 쓴다.
-assert all(key.handle_left_type == "FREE" and key.handle_right_type == "FREE"
+# 매듭마다 좌우 핸들이 한 기울기를 쓰도록 풀므로 키가 break된 상태로 남으면 안 된다.
+assert all(key.handle_left_type == "ALIGNED" and key.handle_right_type == "ALIGNED"
            for curve in rotation_curves for key in curve.keyframe_points)
+# 접선이 실제로 이어졌는지. 키 양쪽 핸들의 기울기가 같아야 그래프가 꺾이지 않는다.
+worst_kink = 0.0
+for curve in rotation_curves:
+    points = curve.keyframe_points
+    for position in range(1, len(points) - 1):
+        key = points[position]
+        left = (key.co.y - key.handle_left.y) / max(1e-6, key.co.x - key.handle_left.x)
+        right = (key.handle_right.y - key.co.y) / max(1e-6, key.handle_right.x - key.co.x)
+        worst_kink = max(worst_kink, abs(left - right))
+assert worst_kink < 1e-4, f"키에서 접선이 끊겼습니다: {worst_kink:.6f}"
 # 핸들 x는 구간의 1/3 지점이어야 x(t)가 선형이고 우리 계산과 Blender 평가가 일치한다.
 for curve in rotation_curves:
     points = curve.keyframe_points
@@ -385,11 +395,11 @@ def worst_fit(low, high):
                 for point in range(low + 1, high)), default=0.0)
 
 
-merged_knots, merged_segments = retarget._fit_group(probe_frames, probe, probe_tolerance, spread)
+merged_knots, merged_segments = retarget._select_knots(probe_frames, probe, probe_tolerance, spread)
 keep = retarget._merge_segments
 retarget._merge_segments = lambda segments, fit, tolerance: segments
 try:
-    split_knots, _split_segments = retarget._fit_group(probe_frames, probe, probe_tolerance, spread)
+    split_knots, _split_segments = retarget._select_knots(probe_frames, probe, probe_tolerance, spread)
 finally:
     retarget._merge_segments = keep
 assert len(merged_knots) < len(split_knots), (len(merged_knots), len(split_knots))
@@ -424,3 +434,37 @@ print(f"CATANI_PASS 합성 CMU BVH 22부위 리타게팅·최대 방향 오차 {
       f"정면 정렬 {skew:+.1f}° → {aligned:+.2f}°·"
       f"구간 병합 매듭 {len(split_knots)}→{len(merged_knots)}개·"
       f"손목 굽힘 오차 {worst_wrist:.2f}°")
+
+# 12번: 접선을 이어 다시 푼 최종 곡선. 허용치를 지키면서 매듭에서 기울기가 이어져야 한다.
+fit_knots, fit_segments = retarget._fit_group(probe_frames, probe, probe_tolerance, spread)
+assert max(retarget._segment_worst(probe_frames, probe, segment, spread, probe_tolerance)[0]
+           for segment in fit_segments) <= probe_tolerance, "접선을 이은 곡선이 허용치를 넘습니다"
+worst_slope = 0.0
+for position in range(len(fit_segments) - 1):
+    low, high, controls = fit_segments[position]
+    next_low, next_high, next_controls = fit_segments[position + 1]
+    before = (probe[0][high] - controls[0][1]) / ((probe_frames[high] - probe_frames[low]) / 3.0)
+    after = (next_controls[0][0] - probe[0][next_low]) / ((probe_frames[next_high] - probe_frames[next_low]) / 3.0)
+    worst_slope = max(worst_slope, abs(before - after))
+assert worst_slope < 1e-9, f"매듭에서 접선이 끊겼습니다: {worst_slope:.3e}"
+# 간소화를 꺼도 접선은 이어져야 한다. 예전에는 이 경로가 직선 핸들만 만들었다.
+dense_knots, dense_segments = retarget._fit_group(probe_frames, probe, 0.0, spread)
+assert len(dense_knots) == len(probe_frames), len(dense_knots)
+assert any(abs(controls[0][0] - (probe[0][low] + (probe[0][high] - probe[0][low]) / 3.0)) > 1e-9
+           for low, high, controls in dense_segments), "간소화를 끄면 핸들이 직선으로 남습니다"
+
+# 13번: 한 프레임짜리 튐은 매듭을 부르지 않고, 허용치의 NOISE_PEAK배를 넘는 튐은 부른다.
+spike_frames = list(range(1, 61))
+
+
+def spiked(height):
+    """직선 위에 한 프레임짜리 튐만 얹은 검사용 신호. 매듭은 튐 때문에만 생긴다."""
+    values = [value * 0.01 for value in range(len(spike_frames))]
+    values[30] += height
+    return [values]
+
+
+quiet_knots, _quiet = retarget._fit_group(spike_frames, spiked(probe_tolerance * 2.0), probe_tolerance, spread)
+loud_knots, _loud = retarget._fit_group(spike_frames, spiked(probe_tolerance * 8.0), probe_tolerance, spread)
+assert quiet_knots == [0, len(spike_frames) - 1], f"한 프레임짜리 노이즈에 매듭이 박혔습니다: {quiet_knots}"
+assert 30 in loud_knots, f"허용치의 {retarget.NOISE_PEAK}배를 넘는 변화에 매듭이 없습니다: {loud_knots}"

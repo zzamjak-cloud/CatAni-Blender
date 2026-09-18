@@ -16,7 +16,9 @@ MAX_KEYFRAMES = 2_000_000
 # 실측 CMU 걷기에서 이 값이면 키가 90% 줄고 방향 오차는 2.2° 안에 머문다.
 DEFAULT_SIMPLIFY = 1.0
 # 노이즈 완화 기본 창 크기(프레임). 0이나 1이면 완화하지 않는다.
-# 실측에서 완화는 손익이 나빴다. 같은 키 수를 허용 오차로 얻는 편이 오차가 더 작다.
+# 키는 확실히 줄지만(CMU 3개 클립에서 -15~-22%) 발 고정 판정(STANCE_SPEED_RATIO)이
+# 완화로 느려진 발을 스탠스로 잘못 보는 클립이 있어 기본으로는 끈다. CMU 88_06에서
+# 창 3은 방향 오차를 1.86°에서 7.01°로 키웠다. 지저분한 캡처에만 손으로 켠다.
 DEFAULT_SMOOTH = 0
 # 실측 무릎 방향이 루트 본(허벅지·위팔)의 비틀림에서 예측한 쪽으로 최소 이만큼은 굽어
 # 있어야 한다고 보는 문턱. 루트 본 길이에 대한 비율이며 `side/arm`이 관절이 굽은 각의
@@ -40,6 +42,18 @@ REACH_MARGIN = 0.01
 # 옮겨도 무릎 각이 크게 돌아 다리가 튄다. 실측에서 4배면 2°를 넘는 튐이 사라졌고, 더
 # 조여도 이득은 거의 없이 키만 늘었다(01_13에서 16배는 키 +42%에 0.6° 개선).
 IK_CURVE_TIGHTEN = 4.0
+# 매듭 기울기를 사전분포(단조 제한 캣멀롬) 쪽으로 당기는 무게. 구간에 내부 표본이 없을 때
+# 해를 하나로 정하는 것이 주 역할이고, 표본이 있는 구간에서는 영향이 몇 %에 그친다.
+TANGENT_PRIOR = 0.002
+# 접선을 이어 다시 푼 곡선이 허용치를 넘으면 매듭을 더해 다시 푸는 최대 횟수.
+TANGENT_ROUNDS = 4
+# 허용치를 벗어난 표본이 이만큼 연속으로 이어져야 매듭을 놓는다. 한 프레임만 튀는 표본은
+# 모캡 노이즈다. 그 자리에 매듭을 놓으면 흐름과 무관한 키가 이웃 프레임에 줄줄이 박힌다.
+NOISE_RUN = 2
+# 다만 한 프레임짜리라도 허용치의 이 배수를 넘으면 노이즈가 아니라 빠른 자세 변화로 본다.
+# 상한을 두지 않으면 한 프레임이 얼마든지 벗어날 수 있어, 허용치를 조금만 키워도 결과가
+# 무너진다(실측 CMU 88_06, 1.5°에서 방향 오차 10.2°).
+NOISE_PEAK = 3.0
 # 되살리기를 몇 번까지 반복할지. 한 번에 위반 프레임을 모두 넣으므로 보통 1~2회에 끝난다.
 TIGHTEN_ROUNDS = 3
 
@@ -420,18 +434,24 @@ def _kernel(window):
 
 
 def _smooth_series(series, window, combine):
-    """구간 양 끝은 창을 잘라 쓰고, 가중치를 다시 정규화해 값이 끌려가지 않게 한다."""
-    weights = _kernel(window)
-    if len(weights) < 3 or len(series) < 3:
+    """구간 양 끝에서는 창을 좌우 대칭으로 줄여 쓴다.
+
+    한쪽만 잘라 쓰면 가중치를 다시 정규화해도 창이 한쪽으로 치우쳐, 기울기가 있는
+    구간의 첫·끝 프레임이 안쪽으로 끌려간다. 대칭으로 줄이면 그 편향이 없다.
+    """
+    full = _kernel(window)
+    if len(full) < 3 or len(series) < 3:
         return series
-    half = len(weights) // 2
+    limit = len(full) // 2
     smoothed = []
     for index in range(len(series)):
-        low = max(0, index - half)
-        high = min(len(series), index + half + 1)
-        picked = [(series[position], weights[position - index + half]) for position in range(low, high)]
-        scale = sum(weight for _value, weight in picked)
-        smoothed.append(combine([(value, weight / scale) for value, weight in picked]))
+        half = min(index, len(series) - 1 - index, limit)
+        if half < 1:
+            smoothed.append(series[index])
+            continue
+        weights = _kernel(2 * half + 1)
+        smoothed.append(combine([(series[index - half + offset], weight)
+                                 for offset, weight in enumerate(weights)]))
     return smoothed
 
 
@@ -1103,13 +1123,225 @@ def _merge_segments(segments, fit, tolerance):
     return segments
 
 
-def _fit_group(frames, channels, tolerance, metric):
-    """오차 허용치를 지키면서 매듭을 가장 적게 쓰는 베지어 구간들을 만든다.
+def _select_knots(frames, channels, tolerance, metric):
+    """허용치를 지키면서 매듭을 가장 적게 쓰는 위치를 고른다.
 
     구간 하나로 맞춰 보고 오차가 넘으면 가장 어긋난 지점에서 쪼갠다. 키를 표본
     프레임에만 놓는 방식과 달리 구간이 데이터에 맞게 휘므로 같은 오차에서 매듭이
     훨씬 적게 남는다. 쪼갠 뒤에는 이웃 구간을 다시 합쳐 보아 하향식 쪼개기가 남긴
     불필요한 매듭을 걷어낸다.
+
+    여기서는 구간마다 독립으로 적합해 위치만 빠르게 훑는다. 실제 제어점은 매듭에서
+    접선이 이어지도록 _fit_group이 곡선 전체를 다시 풀어 얻는다.
+    """
+    count = len(frames)
+
+    def fit(low, high):
+        """구간 하나를 적합해 (제어점들, 최악 오차, 최악 위치)를 돌려준다."""
+        width = float(frames[high] - frames[low]) or 1.0
+        spans = {position: (frames[position] - frames[low]) / width for position in range(low, high + 1)}
+        controls = [_solve_handles(spans, values, low, high) for values in channels]
+        worst, chosen = _segment_worst(frames, channels, (low, high, controls), metric, tolerance)
+        return controls, worst, chosen
+
+    segments = []
+    stack = [(0, count - 1)]
+    while stack:
+        low, high = stack.pop()
+        controls, worst, chosen = fit(low, high)
+        if worst <= tolerance or chosen < 0:
+            segments.append((low, high, controls))
+            continue
+        stack.append((chosen, high))
+        stack.append((low, chosen))
+    segments.sort()
+    segments = _merge_segments(segments, fit, tolerance)
+    return [segments[0][0]] + [segment[1] for segment in segments], segments
+
+
+def _prior_tangents(times, heights):
+    """매듭만 지나는 부드러운 곡선의 기울기.
+
+    내부 표본이 없는 구간에서는 이 값이 해를 정한다. 캣멀롬 기울기를 쓰되 국소 극값에서는
+    0으로 두고 이웃 기울기의 3배를 넘으면 잘라, 단조 구간이 부풀어 발이 바닥을 뚫는
+    오버슈트가 생기지 않게 한다.
+    """
+    count = len(times)
+    if count < 2:
+        return [0.0] * count
+    secants = [(heights[index + 1] - heights[index]) / ((times[index + 1] - times[index]) or 1.0)
+               for index in range(count - 1)]
+    tangents = []
+    for index in range(count):
+        before = secants[index - 1] if index > 0 else secants[0]
+        after = secants[index] if index < count - 1 else secants[-1]
+        if before * after <= 0.0:
+            tangents.append(0.0)
+            continue
+        limit = 3.0 * min(abs(before), abs(after))
+        slope = (before + after) / 2.0
+        tangents.append(math.copysign(min(abs(slope), limit), slope))
+    return tangents
+
+
+def _solve_tridiagonal(diagonal, upper, rhs):
+    """대칭 삼중대각 연립방정식을 전방소거·후방대입으로 푼다."""
+    count = len(diagonal)
+    pivots, values = list(diagonal), list(rhs)
+    for index in range(1, count):
+        if abs(pivots[index - 1]) < 1e-12:
+            pivots[index - 1] = 1e-12
+        factor = upper[index - 1] / pivots[index - 1]
+        pivots[index] -= factor * upper[index - 1]
+        values[index] -= factor * values[index - 1]
+    if abs(pivots[-1]) < 1e-12:
+        pivots[-1] = 1e-12
+    solution = [0.0] * count
+    solution[-1] = values[-1] / pivots[-1]
+    for index in range(count - 2, -1, -1):
+        solution[index] = (values[index] - upper[index] * solution[index + 1]) / pivots[index]
+    return solution
+
+
+def _solve_tangents(frames, values, knots, times, prior):
+    """매듭마다 좌우 핸들이 한 기울기를 쓰도록 곡선 전체를 한 번에 최소제곱으로 푼다.
+
+    핸들의 x를 구간의 1/3에 두므로, 매듭 하나에 기울기 하나만 쓰면 좌우 핸들이 저절로
+    일직선이 된다. 구간마다 따로 적합하면 매듭에서 좌우 접선이 어긋나 그래프가 키마다
+    꺾이고 핸들이 break된 채로 남는다. 이렇게 묶어 풀면 곡선이 C1 연속이 되어 손·머리·
+    척추가 키 지점에서 떠는 현상이 사라진다.
+
+    표본 하나는 자기 구간의 두 매듭만 건드리므로 정규방정식이 삼중대각이다.
+    """
+    count = len(knots)
+    diagonal = [0.0] * count
+    upper = [0.0] * max(0, count - 1)
+    rhs = [0.0] * count
+    for segment in range(count - 1):
+        low, high = knots[segment], knots[segment + 1]
+        width = (times[segment + 1] - times[segment]) or 1.0
+        first, last = values[low], values[high]
+        for position in range(low + 1, high):
+            t = (frames[position] - times[segment]) / width
+            one = 1.0 - t
+            left = one * one * t * width
+            right = -one * t * t * width
+            residual = values[position] - ((one + 3.0 * t) * one * one * first
+                                           + (3.0 * one + t) * t * t * last)
+            diagonal[segment] += left * left
+            diagonal[segment + 1] += right * right
+            upper[segment] += left * right
+            rhs[segment] += left * residual
+            rhs[segment + 1] += right * residual
+    for index in range(count):
+        near = ([times[index + 1] - times[index]] if index < count - 1 else [])
+        near += ([times[index] - times[index - 1]] if index > 0 else [])
+        span = sum(near) / len(near) if near else 1.0
+        weight = TANGENT_PRIOR * span * span
+        diagonal[index] += weight
+        rhs[index] += weight * prior[index]
+    return _solve_tridiagonal(diagonal, upper, rhs)
+
+
+def _tangent_segments(frames, channels, knots):
+    """푼 매듭 기울기를 구간별 제어점으로 바꾼다."""
+    times = [float(frames[knot]) for knot in knots]
+    tangents = [_solve_tangents(frames, values, knots, times,
+                                _prior_tangents(times, [values[knot] for knot in knots]))
+                for values in channels]
+    segments = []
+    for index in range(len(knots) - 1):
+        low, high = knots[index], knots[index + 1]
+        width = (times[index + 1] - times[index]) or 1.0
+        segments.append((low, high,
+                         [(values[low] + slopes[index] * width / 3.0,
+                           values[high] - slopes[index + 1] * width / 3.0)
+                          for values, slopes in zip(channels, tangents)]))
+    return segments
+
+
+def _segment_worst(frames, channels, segment, metric, tolerance):
+    """허용치를 연속으로 벗어난 곳에서만 최악 오차와 그 위치를 돌려준다.
+
+    한 프레임만 벗어난 표본은 모캡 노이즈로 보고 넘긴다. 그 자리에 매듭을 놓으면 곡선이
+    노이즈를 따라가느라 서로 이웃한 프레임에 키가 줄줄이 박히고, 그래프의 흐름과 상관없는
+    키가 남는다. NOISE_RUN 프레임 이상 연달아 벗어났거나 한 프레임이라도 허용치의
+    NOISE_PEAK배를 넘으면 실제 동작이므로 매듭을 놓는다.
+
+    허용치가 0이면 비교 기준이 없으므로 그냥 최대 오차를 돌려준다.
+    """
+    low, high, controls = segment
+    width = float(frames[high] - frames[low]) or 1.0
+    spans = {position: (frames[position] - frames[low]) / width for position in range(low, high + 1)}
+    worst, chosen = 0.0, -1
+    run, peak, peak_at = 0, 0.0, -1
+    for position in range(low + 1, high + 1):
+        error = 0.0
+        if position < high:
+            predicted = tuple(_evaluate(control, spans, values, low, high, position)
+                              for control, values in zip(controls, channels))
+            actual = tuple(values[position] for values in channels)
+            error = metric(actual, predicted)
+        if tolerance <= 0.0:
+            if error > worst:
+                worst, chosen = error, position
+            continue
+        if position < high and error > tolerance:
+            run += 1
+            if error > peak:
+                peak, peak_at = error, position
+            continue
+        if (run >= NOISE_RUN or peak > NOISE_PEAK * tolerance) and peak > worst:
+            worst, chosen = peak, peak_at
+        run, peak, peak_at = 0, 0.0, -1
+    return worst, chosen
+
+
+def _tangent_offenders(frames, channels, segments, tolerance, metric):
+    """접선을 이은 곡선이 허용치를 넘는 구간마다 가장 어긋난 표본 위치를 모은다."""
+    picked = set()
+    for segment in segments:
+        worst, chosen = _segment_worst(frames, channels, segment, metric, tolerance)
+        if chosen >= 0 and worst > tolerance:
+            picked.add(chosen)
+    return picked
+
+
+def _prune_knots(frames, channels, knots, tolerance, metric):
+    """매듭을 하나씩 빼 보고 허용치를 지키면 버린다.
+
+    접선을 이어 풀면 구간이 이웃의 정보까지 쓰므로, 구간별 독립 적합이 고른 매듭 중
+    상당수가 필요 없어진다. 이 패스가 없으면 연속 조건을 지키느라 키가 오히려 는다.
+
+    매듭 하나를 빼면 삼중대각 해가 전 구간에서 조금씩 움직이지만 영향은 매듭을 건널
+    때마다 빠르게 줄어든다. 그래서 여기서는 뺀 자리 둘레만 다시 재고, 전체 검증은
+    부르는 쪽에서 한 번에 한다.
+    """
+    kept = list(knots)
+    index = 1
+    while index < len(kept) - 1:
+        trial = kept[:index] + kept[index + 1:]
+        segments = _tangent_segments(frames, channels, trial)
+        low = trial[max(0, index - 2)]
+        high = trial[min(len(trial) - 1, index + 1)]
+        if all(_segment_worst(frames, channels, segment, metric, tolerance)[0] <= tolerance
+               for segment in segments if segment[1] > low and segment[0] < high):
+            kept = trial
+        else:
+            index += 1
+    return kept
+
+
+def _fit_group(frames, channels, tolerance, metric):
+    """허용치를 지키는 매듭을 고르고, 매듭에서 접선이 이어지는 베지어 구간을 만든다.
+
+    매듭 위치는 구간별 독립 적합으로 훑고(_select_knots), 제어점은 매듭마다 기울기
+    하나를 공유하도록 곡선 전체를 다시 풀어 얻는다(_solve_tangents). 다시 푼 곡선이
+    허용치를 넘는 구간에는 가장 어긋난 자리에 매듭을 더하고, 반대로 남아도는 매듭은
+    빼 본다(_prune_knots). 연속 조건만 놓고 보면 매듭당 자유도가 둘에서 하나로 줄어
+    키가 조금 늘지만, 한 프레임짜리 튐을 매듭으로 세지 않는 판정(_segment_worst)까지
+    합치면 실측 CMU 3개 클립에서 키가 11~19% 줄고 키 간격이 1프레임인 비율도 25%에서
+    12~15%로 떨어진다. 키마다 꺾이던 접선도 사라진다.
 
     돌려주는 값은 (매듭 인덱스, 채널별 구간 제어점)이다.
     """
@@ -1117,49 +1349,39 @@ def _fit_group(frames, channels, tolerance, metric):
     if count < 2:
         return list(range(count)), []
     if tolerance <= 0.0:
-        # 간소화를 끄면 모든 프레임을 매듭으로 남긴다.
+        # 간소화를 끄면 모든 프레임을 매듭으로 남긴다. 그래도 접선은 이어 부드럽게 만든다.
         knots = list(range(count))
-    else:
-        knots = None
-
-    def fit(low, high):
-        """구간 하나를 적합해 (제어점들, 최대 오차, 최악 위치)를 돌려준다."""
-        width = float(frames[high] - frames[low]) or 1.0
-        spans = {position: (frames[position] - frames[low]) / width for position in range(low, high + 1)}
-        controls = [_solve_handles(spans, values, low, high) for values in channels]
-        worst, chosen = 0.0, -1
-        for position in range(low + 1, high):
-            predicted = tuple(_evaluate(control, spans, values, low, high, position)
-                              for control, values in zip(controls, channels))
-            actual = tuple(values[position] for values in channels)
-            error = metric(actual, predicted)
-            if error > worst:
-                worst, chosen = error, position
-        return controls, worst, chosen
-
-    segments = []
-    if knots is None:
-        stack = [(0, count - 1)]
-        while stack:
-            low, high = stack.pop()
-            controls, worst, chosen = fit(low, high)
-            if worst <= tolerance or chosen < 0:
-                segments.append((low, high, controls))
-                continue
-            stack.append((chosen, high))
-            stack.append((low, chosen))
-        segments.sort()
-        segments = _merge_segments(segments, fit, tolerance)
-    else:
-        for position in range(count - 1):
-            controls, _worst, _chosen = fit(position, position + 1)
-            segments.append((position, position + 1, controls))
-    knots = [segments[0][0]] + [segment[1] for segment in segments]
+        return knots, _tangent_segments(frames, channels, knots)
+    knots = _select_knots(frames, channels, tolerance, metric)[0]
+    segments = _tangent_segments(frames, channels, knots)
+    for _round in range(TANGENT_ROUNDS):
+        extra = _tangent_offenders(frames, channels, segments, tolerance, metric)
+        if not extra:
+            break
+        knots = sorted(set(knots) | extra)
+        segments = _tangent_segments(frames, channels, knots)
+    for _round in range(TANGENT_ROUNDS):
+        pruned = _prune_knots(frames, channels, knots, tolerance, metric)
+        if len(pruned) == len(knots):
+            break
+        knots, segments = pruned, _tangent_segments(frames, channels, pruned)
+    # 솎아내기는 뺀 자리 둘레만 보므로, 전체를 다시 재어 넘치는 자리를 채운다.
+    for _round in range(TANGENT_ROUNDS):
+        extra = _tangent_offenders(frames, channels, segments, tolerance, metric)
+        if not extra:
+            break
+        knots = sorted(set(knots) | extra)
+        segments = _tangent_segments(frames, channels, knots)
     return knots, segments
 
 
 def _write_group(bag, path, group, frames, channels, knots, segments):
-    """적합 결과를 자유 핸들 베지어 곡선으로 쓴다."""
+    """적합 결과를 베지어 곡선으로 쓴다.
+
+    매듭마다 좌우 핸들이 한 기울기를 공유하도록 풀었으므로(_solve_tangents) 두 핸들은
+    이미 일직선이다. 핸들 유형을 ALIGNED로 남겨 두어야 그래프 편집기에서 키가 break된
+    상태로 보이지 않고, 사용자가 한쪽 핸들을 잡아도 반대쪽이 따라와 곡선이 계속 이어진다.
+    """
     curves = []
     # 직접 대입은 문자열 enum을 받는다. 정수는 foreach_set에서만 쓴다.
     for index, values in enumerate(channels):
@@ -1169,6 +1391,7 @@ def _write_group(bag, path, group, frames, channels, knots, segments):
             key = curve.keyframe_points[position]
             key.co = (float(frames[knot]), float(values[knot]))
             key.interpolation = "BEZIER"
+            # 좌표를 직접 넣는 동안에는 FREE여야 블렌더가 우리 값을 되돌리지 않는다.
             key.handle_left_type = "FREE"
             key.handle_right_type = "FREE"
             key.handle_left = key.co
@@ -1178,9 +1401,28 @@ def _write_group(bag, path, group, frames, channels, knots, segments):
             left, right = controls[index]
             curve.keyframe_points[position].handle_right = (frames[low] + width / 3.0, left)
             curve.keyframe_points[position + 1].handle_left = (frames[high] - width / 3.0, right)
+        _mirror_ends(curve)
+        for key in curve.keyframe_points:
+            key.handle_left_type = "ALIGNED"
+            key.handle_right_type = "ALIGNED"
         curve.update()
         curves.append(curve)
     return curves
+
+
+def _mirror_ends(curve):
+    """양 끝 키의 바깥쪽 핸들을 안쪽 핸들의 반대편으로 맞춘다.
+
+    바깥쪽 핸들은 곡선 평가에 쓰이지 않지만, 안쪽과 일직선이 아니면 ALIGNED로 바꿀 때
+    블렌더가 안쪽 핸들을 평균 방향으로 돌려 첫·끝 구간의 접선이 틀어진다.
+    """
+    points = curve.keyframe_points
+    if len(points) < 2:
+        return
+    for key, inner, outer in ((points[0], "handle_right", "handle_left"),
+                              (points[len(points) - 1], "handle_left", "handle_right")):
+        near = getattr(key, inner)
+        setattr(key, outer, (2.0 * key.co.x - near.x, 2.0 * key.co.y - near.y))
 
 
 def _measure_group(curves, frames, channels, metric):
