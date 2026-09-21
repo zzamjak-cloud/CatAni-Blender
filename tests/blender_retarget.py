@@ -4,6 +4,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 
 import bpy
@@ -313,6 +314,17 @@ assert abs(aligned) < 0.5, f"정면 정렬 뒤 첫 프레임이 캐릭터 정면
 assert abs(abs(tight["facing_angle"]) - abs(skew)) < 0.5, (tight["facing_angle"], skew)
 # 정렬은 방위만 돌리므로 모션 충실도(검증 오차)를 흔들면 안 된다.
 assert abs(tight["max_direction_error"] - loose["max_direction_error"]) < 0.01, (tight["max_direction_error"], loose["max_direction_error"])
+# 사용자가 고르는 회전 보정은 자동 정렬 위에 그만큼 더 돌려야 한다(제공처마다 정면 기준이 다르다).
+for wanted in (90.0, -90.0, 180.0):
+    turned = retarget.apply_motion(bpy.context, yawed, target, use_ik=False, align_facing=True,
+                                   facing_offset=wanted, name=f"회전 보정 {wanted:+.0f}")
+    seen = facing_offset(turned["frame_start"])
+    assert turned["facing_offset"] == wanted, turned["facing_offset"]
+    assert abs((seen - wanted + 180.0) % 360.0 - 180.0) < 0.5, f"회전 보정 {wanted:+.0f}°: {seen:.2f}°"
+    # 몸을 통째로 돌릴 뿐이므로 모션 충실도는 그대로여야 한다.
+    assert abs(turned["max_direction_error"] - tight["max_direction_error"]) < 0.01, (turned["max_direction_error"], tight["max_direction_error"])
+    report_lines = retarget.format_report(SimpleNamespace(name="회전 보정", path="walk_yaw.bvh", source_id=""), turned)
+    assert any("회전 보정" in line for line in report_lines), report_lines
 bpy.data.objects.remove(yawed)
 
 # 12번 준비: 지어낸 방향 판별기가 두 형태를 모두 잡고 진짜 짧은 본은 놓아주는지.

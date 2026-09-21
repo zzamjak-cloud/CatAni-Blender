@@ -78,10 +78,12 @@ main = record(addon.CATANI_PT_main.draw, bpy.context)
 assert main["lists"] == [("CATANI_UL_motions", "motions")], main["lists"]
 assert addon._LIST_ROWS >= 16, addon._LIST_ROWS
 assert {"motion_query", "motion_category", "local_only", "target_armature"} <= set(main["properties"]), main["properties"]
+# 적용할 때마다 만지는 굽기 옵션은 주 패널에 바로 있어야 한다.
+assert {"facing_offset", "frame_step", "smooth_window", "simplify_error"} <= set(main["properties"]), main["properties"]
 assert {"catani.motion_apply", "catani.motion_preview", "catani.motion_refresh"} <= set(main["operators"]), main["operators"]
 assert main["operators"].count("catani.motion_apply") == 1
-# 폴더·굽기 옵션 같은 상세 설정과 받기 전용 경로는 주 패널에 없어야 한다.
-for hidden in ("motion_library_path", "frame_step", "smooth_window", "simplify_error", "use_location", "hide_source"):
+# 폴더 같은 드문 설정과 받기 전용 경로는 주 패널에 없어야 한다.
+for hidden in ("motion_library_path", "use_location", "hide_source"):
     assert hidden not in main["properties"], f"상세 설정이 주 패널에 노출되었습니다: {hidden}"
 for hidden in ("catani.motion_download", "catani.motion_import", "wm.url_open"):
     assert hidden not in main["operators"], f"보조 동작이 주 패널에 노출되었습니다: {hidden}"
@@ -127,9 +129,11 @@ assert selected.license_note.split(".")[0].replace(" ", "") in packed, "팝업�
 urls = {getattr(button, "url", "") for button in info["buttons"]}
 assert selected.source_url in urls and selected.license_url in urls, urls
 
-# 상세 팝업이 폴더·굽기 옵션·리포트와 보조 연산자를 담는지.
+# 상세 팝업이 폴더·드문 옵션·리포트와 보조 연산자를 담는지.
 detail = record(addon.CATANI_OT_settings.draw, bpy.context)
-assert {"motion_library_path", "frame_step", "use_location", "hide_source"} <= set(detail["properties"]), detail["properties"]
+assert {"motion_library_path", "use_location", "hide_source"} <= set(detail["properties"]), detail["properties"]
+for moved in ("frame_step", "smooth_window", "simplify_error"):
+    assert moved not in detail["properties"], f"주 패널로 옮긴 옵션이 팝업에 남았습니다: {moved}"
 assert {"catani.motion_refresh", "catani.motion_download", "catani.motion_import"} <= set(detail["operators"]), detail["operators"]
 assert any("적용 리포트" in label for label in detail["labels"]), detail["labels"]
 assert {"catani.library_open", "catani.library_guide"} <= set(detail["operators"]), detail["operators"]

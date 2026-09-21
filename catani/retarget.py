@@ -1820,12 +1820,16 @@ def verify(context, source, target, pairs, frames, facing=None, exclude=()):
 
 def apply_motion(context, source, target, *, step=1, use_location=True, ground=True,
                  simplify=DEFAULT_SIMPLIFY, smooth=DEFAULT_SMOOTH, use_ik=False, align_facing=True,
-                 anchor_feet=True, name="CatAni 모션"):
+                 facing_offset=0.0, anchor_feet=True, name="CatAni 모션"):
     """모션 리그의 동작을 캐릭터에 굽고 적용 결과 보고서를 돌려준다.
 
     anchor_feet가 켜져 있으면 발로 끝나는 IK 체인의 목표를 원본 발이 멈춘 구간에서 고정한다
     (_anchor_ends). 구운 키는 걷어낸 선두 보정 프레임만큼 앞으로 옮겨 원본 첫 프레임에서
     시작한다.
+
+    facing_offset은 자동 정면 정렬 위에 사용자가 얹는 수직축 회전(도)이다. 제공처마다
+    캡처 좌표계의 정면 기준이 달라 자동 정렬만으로는 90°·180° 돌아간 채 구워지는 클립이
+    있어, 0/+90/-90/180을 직접 고를 수 있게 둔다.
     """
     for obj in (source, target):
         if obj is None or obj.type != "ARMATURE":
@@ -1858,6 +1862,10 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
     translation_scale = target_height / source_height if use_location and source_height > 1e-5 and target_height > 1e-5 else 0.0
     corrections = _roll_corrections(source, target, pairs)
     facing, facing_angle = _facing_correction(context, source, target, pairs, frames, corrections) if align_facing else (Quaternion(), 0.0)
+    # 사용자가 고른 수직축 오프셋은 자동 정렬 결과 위에 얹는다(자동 정렬을 꺼도 그대로 먹는다).
+    facing_offset = float(facing_offset)
+    if abs(facing_offset) > 1e-6:
+        facing = Quaternion(Z_AXIS, math.radians(facing_offset)) @ facing
     scene = context.scene
     state = (scene.frame_current, scene.frame_subframe, scene.frame_start, scene.frame_end)
     if target.animation_data and target.animation_data.use_tweak_mode:
@@ -1982,6 +1990,7 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
             "target_bone_total": len(target.data.bones), "translation_scale": translation_scale,
             "simplify": simplify, "dense_keyframes": dense, "smooth": smooth, "dropped_frames": dropped,
             "align_facing": align_facing, "facing_angle": math.degrees(facing_angle),
+            "facing_offset": facing_offset,
             "ik": [setup["control"] for setup in setups], "ik_requested": use_ik,
             "ik_effector": ik_effector, "ik_middle": ik_middle, "anchored": sorted(anchored.values()),
             "flattened_frames": flattened_frames, "reach_lower": reach_lower,
@@ -2032,6 +2041,8 @@ def format_report(asset, report):
         lines.append(f"정면 정렬: {report['facing_angle']:+.1f}° · 모션 첫 프레임의 정면을 캐릭터 레스트 정면으로 돌렸습니다")
     else:
         lines.append("정면 정렬: 보정 불필요 · 모션이 이미 캐릭터 정면을 향합니다")
+    if report.get("facing_offset"):
+        lines.append(f"회전 보정: {report['facing_offset']:+.0f}° · 사용자가 고른 수직축 회전을 정면 정렬 위에 더했습니다")
     if report["dropped_frames"]:
         lines.append(f"선두 보정 프레임 제거: {report['dropped_frames']}개 · 모션 파일 첫 프레임이 T포즈 보정 자세라 그대로 구우면 팝이 남습니다")
     lines.append(f"노이즈 완화: {report['smooth']}프레임 창" if report["smooth"] > 1 else "노이즈 완화: 없음")

@@ -481,6 +481,14 @@ class CatAniSettings(bpy.types.PropertyGroup):
     use_ik: BoolProperty(name="IK로 전환",
                          description="캐릭터 리그에 IK 컨스트레인트가 있으면 팔다리를 IK 컨트롤 본으로 굽습니다. 체인·폴 구성은 리그의 컨스트레인트에서 직접 읽습니다",
                          default=True)
+    facing_offset: EnumProperty(name="회전 보정",
+                                description="제공처마다 캡처 좌표계의 정면 기준이 달라 자동 정렬만으로는 옆이나 뒤를 본 채 구워지는 클립이 있습니다. "
+                                            "그럴 때 여기서 수직축 회전을 직접 얹습니다",
+                                items=[("0", "0°", "회전을 더하지 않습니다"),
+                                       ("90", "+90°", "반시계 방향으로 90° 돌립니다"),
+                                       ("-90", "-90°", "시계 방향으로 90° 돌립니다"),
+                                       ("180", "180°", "뒤로 돌립니다")],
+                                default="0")
     align_facing: BoolProperty(name="정면 정렬",
                                description="모션 파일마다 다른 캡처 방향을 첫 프레임 기준으로 캐릭터 정면에 맞춥니다. 수직축 회전만 돌리므로 누운 동작의 기울기는 그대로 둡니다",
                                default=True)
@@ -561,7 +569,8 @@ class CATANI_OT_motion_apply(bpy.types.Operator):
             report = retarget.apply_motion(context, source, target, step=settings.frame_step, use_location=settings.use_location,
                                            ground=settings.ground_contact, simplify=math.degrees(settings.simplify_error),
                                            smooth=settings.smooth_window, use_ik=settings.use_ik,
-                                           align_facing=settings.align_facing, name=f"CatAni {item.name}")
+                                           align_facing=settings.align_facing,
+                                           facing_offset=float(settings.facing_offset), name=f"CatAni {item.name}")
         except Exception:
             if collection is not None:
                 bpy.data.batch_remove(ids=[*created, collection])
@@ -1055,9 +1064,8 @@ class CATANI_OT_settings(bpy.types.Operator):
         folder = column.row(align=True)
         folder.operator("catani.library_open", text="폴더 열기", icon="FILE_FOLDER").path = ""
         folder.operator("catani.library_guide", text="보관 위치 안내", icon="QUESTION")
-        column.prop(settings, "frame_step")
-        column.prop(settings, "smooth_window")
-        column.prop(settings, "simplify_error")
+        # 프레임 간격·노이즈 완화·곡선 간소화 오차·회전 보정은 적용할 때마다 만지는 값이라
+        # 이 팝업이 아니라 메인 패널에 그린다.
         column.prop(settings, "align_facing")
         column.prop(settings, "use_location")
         column.prop(settings, "ground_contact")
@@ -1116,6 +1124,12 @@ class CATANI_PT_main(bpy.types.Panel):
             if length:
                 info.label(text=length)
         layout.prop(settings, "target_armature", text="대상")
+        # 적용할 때마다 만지는 굽기 옵션은 상세 설정에 숨기지 않고 여기서 바로 고친다.
+        bake = layout.column(align=True)
+        bake.prop(settings, "facing_offset", text="회전 보정")
+        bake.prop(settings, "frame_step")
+        bake.prop(settings, "smooth_window")
+        bake.prop(settings, "simplify_error")
         row = layout.row(align=True)
         if chosen is not None and not chosen.available:
             row.operator("catani.motion_preview", text=f"받아서 재생 · {chosen.size_bytes / 1024:.0f}KB", icon="IMPORT")
