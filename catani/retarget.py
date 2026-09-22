@@ -1566,7 +1566,7 @@ def _write_curves(target, action, frames, rotations, locations, hips, simplify=0
         count, error = _bake_group(bag, path, hips, frames, channels, tolerance, _distance_error)
         written += count
         shift_error = error
-    written += _write_influence(bag, target, frames, ())[0]
+    _apply_influence(bag, target, ())
     return written, angle_error, shift_error, bag
 
 
@@ -1582,15 +1582,18 @@ def _shift_keys(bag, shift):
         curve.update()
 
 
-def _write_influence(bag, target, frames, ik_tracks):
-    """IK 컨스트레인트 영향 키를 다시 쓴다.
+def _apply_influence(bag, target, ik_tracks):
+    """IK 컨스트레인트 영향 값을 맞춘다.
 
     IK로 구울 때는 우리가 값을 채운 체인만 1로 되돌리고, FK로 구울 때는 0으로 눌러야
     구운 회전 키가 그대로 보인다.
+
+    영향은 컨스트레인트 속성으로만 바꾸고 곡선은 쓰지 않는다. 영향 커브를 남기면
+    forearm.L/R·shin.L/R처럼 리그가 이미 쓰고 있는 IK 스위치를 우리 키가 덮어써서
+    기존 애니메이션의 IK/FK 구조가 깨진다. 혹시 남아 있는 영향 곡선도 지운다.
     """
     driven = {track["setup"]["constraint"] for track in ik_tracks}
     influence = 1.0 if ik_tracks else 0.0
-    written = 0
     disabled = []
     for bone in target.pose.bones:
         for constraint in bone.constraints:
@@ -1601,18 +1604,13 @@ def _write_influence(bag, target, frames, ik_tracks):
             path = constraint.path_from_id("influence")
             for curve in [item for item in bag.fcurves if item.data_path == path]:
                 bag.fcurves.remove(curve)
-            curve = bag.fcurves.new(data_path=path, index=0, group_name=bone.name)
-            key = curve.keyframe_points.insert(frames[0], value)
-            key.interpolation = "CONSTANT"
-            curve.update()
-            written += 1
             if value == 0.0:
                 disabled.append(f"{bone.name}/{constraint.name}")
-    return written, disabled
+    return disabled
 
 
 def _write_ik_curves(bag, target, frames, ik_tracks, simplify, scale):
-    """IK 컨트롤·폴 위치 곡선과 영향 키를 쓴다."""
+    """IK 컨트롤·폴 위치 곡선을 쓰고 컨스트레인트 영향 값을 맞춘다."""
     written = 0
     shift_error = 0.0
     for track in ik_tracks:
@@ -1629,8 +1627,8 @@ def _write_ik_curves(bag, target, frames, ik_tracks, simplify, scale):
                                        _distance_error)
             written += count
             shift_error = max(shift_error, error)
-    count, disabled = _write_influence(bag, target, frames, ik_tracks)
-    return written + count, disabled, shift_error
+    disabled = _apply_influence(bag, target, ik_tracks)
+    return written, disabled, shift_error
 
 
 def _fill(bag, path, index, group, frames, values):
@@ -1931,7 +1929,7 @@ def apply_motion(context, source, target, *, step=1, use_location=True, ground=T
             target, action, frames, rotations, locations if use_location else [], hips,
             simplify=simplify, scale=target_height,
             tighten_location=IK_CURVE_TIGHTEN if setups else 1.0)
-        disabled = _write_influence(bag, target, frames, ())[1]
+        disabled = _apply_influence(bag, target, ())
         ik_effector = ik_middle = 0.0
         pole_fix = {}
         tracks = []
